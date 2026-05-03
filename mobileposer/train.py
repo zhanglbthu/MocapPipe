@@ -6,7 +6,7 @@ torch.set_printoptions(sci_mode=False)
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import lightning as L
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch import seed_everything
 from argparse import ArgumentParser
@@ -37,13 +37,21 @@ class TrainingManager:
         self.hypers = finetune_hypers if finetune else train_hypers
 
     def _setup_wandb_logger(self, save_path: Path):
-        wandb_logger = WandbLogger(
+        wandb_logger = TensorBoardLogger(
             project=save_path.name, 
             name=get_datestring(),
             save_dir=save_path
         ) 
         return wandb_logger
-
+    
+    def _setup_tensorboard_logger(self, save_path: Path):
+        tb_logger = TensorBoardLogger(
+            save_dir=str(save_path),   # 日志根目录
+            name=save_path.name,      # 相当于 project 名
+            version=get_datestring()  # 相当于 run name
+        )
+        return tb_logger
+    
     def _setup_callbacks(self, save_path):
         checkpoint_callback = ModelCheckpoint(
                 monitor="validation_step_loss",
@@ -58,7 +66,7 @@ class TrainingManager:
 
     def _setup_trainer(self, module_path: Path):
         print("Module Path: ", module_path.name, module_path)
-        logger = self._setup_wandb_logger(module_path) 
+        logger = self._setup_tensorboard_logger(module_path)
         checkpoint_callback = self._setup_callbacks(module_path)
         trainer = L.Trainer(
                 fast_dev_run=self.fast_dev_run,
@@ -66,7 +74,7 @@ class TrainingManager:
                 max_epochs=self.hypers.num_epochs,
                 devices=[self.hypers.device], 
                 accelerator=self.hypers.accelerator,
-                # logger=logger,
+                logger=logger,
                 callbacks=[checkpoint_callback],
                 deterministic=True
                 )

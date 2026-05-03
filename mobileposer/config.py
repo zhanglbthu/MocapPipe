@@ -45,7 +45,7 @@ class model_config:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # joint set
-    n_joints = 5                        # (head, right-wrist, left-wrist, right-hip, left-hip)
+    n_joints = 7                        # (head, right-wrist, left-wrist, right-hip, left-hip)
     n_imu = 12*n_joints                 # 60 (3 accel. axes + 3x3 orientation rotation matrix) * 5 possible IMU locations
     n_output_joints = 24                # 24 output joints
     n_pose_output = n_output_joints*6   # 144 pose output (24 output joints * 6D rotation matrix)
@@ -59,32 +59,36 @@ class model_config:
 class amass:
     """AMASS dataset information."""
     # device-location combinationsa
-    combos = {
-        # # new combos
-        # 'lw_rw_lp_rp_h': [0, 1, 2, 3, 4],
+    combos_full = {
+        # # leaf device
+        # 'lw_rw_lp_rp_h_feet': [0, 1, 2, 3, 4, 5, 6],
+        'lw_rw_lp_rp_h': [0, 1, 2, 3, 4],
         # 'lw_rw_lp_rp': [0, 1, 2, 3],
-        # 'lw_rw': [0, 1],
-        # 'lp_rp': [2, 3],
+        # 'lw_rw_h_feet': [0, 1, 4, 5, 6],
+        # 'lw_rw_feet': [0, 1, 5, 6],
         
-        # original combos
-        'lw_rp_h': [0, 3, 4],
-        'rw_rp_h': [1, 3, 4],
-        'lw_lp_h': [0, 2, 4],
-        'rw_lp_h': [1, 2, 4],
-        'lw_lp': [0, 2],
-        'lw_rp': [0, 3],
-        'rw_lp': [1, 2],
-        'rw_rp': [1, 3],
-        'lp_h': [2, 4],
-        'rp_h': [3, 4],
-        'lp': [2],
-        'rp': [3],
+        # # five devices
+        # 'lw_rp_h_feet': [0, 3, 4, 5, 6],
+        # 'rw_rp_h_feet': [1, 3, 4, 5, 6],
+        # 'lw_lp_h_feet': [0, 2, 4, 5, 6],
+        # 'rw_lp_h_feet': [1, 2, 4, 5, 6],
+        # # three devices
+        # 'lw_rp_h': [0, 3, 4],
+        # 'rw_rp_h': [1, 3, 4],
+        # 'lw_lp_h': [0, 2, 4],
+        # 'rw_lp_h': [1, 2, 4],
+        # # two devices
+        # 'lw_rp': [0, 3],
+        # 'rw_rp': [1, 3],
+        # 'lw_lp': [0, 2],
+        # 'rw_lp': [1, 2],
      }
+    
     acc_scale = 30
     vel_scale = 2
 
     # left wrist, right wrist, left thigh, right thigh, head, pelvis
-    all_imu_ids = [0, 1, 2, 3, 4] 
+    all_imu_ids = [0, 1, 2, 3, 4, 5, 6]
     imu_ids = [0, 1, 2, 3]
 
     pred_joints_set = [*range(24)]

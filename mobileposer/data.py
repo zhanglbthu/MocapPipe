@@ -22,7 +22,7 @@ class PoseDataset(Dataset):
         self.evaluate = evaluate
         self.finetune = finetune
         self.bodymodel = art.model.ParametricModel(paths.smpl_file)
-        self.combos = list(amass.combos.items())
+        self.combos = list(amass.combos_full.items())
         self.data = self._prepare_dataset()
 
     def _get_data_files(self, data_folder):
@@ -46,12 +46,10 @@ class PoseDataset(Dataset):
         data_folder = paths.processed_datasets / ('eval' if (self.finetune or self.evaluate) else '')
         data_files = self._get_data_files(data_folder)
         data = {key: [] for key in ['imu_inputs', 'pose_outputs', 'joint_outputs', 'tran_outputs', 'vel_outputs', 'foot_outputs']}
+        
         for data_file in tqdm(data_files):
-            try:
-                file_data = torch.load(data_folder / data_file)
-                self._process_file_data(file_data, data)
-            except Exception as e:
-                print(f"Error processing {data_file}: {e}.")
+            file_data = torch.load(data_folder / data_file)
+            self._process_file_data(file_data, data)
         return data
 
     def _process_file_data(self, file_data, data):
@@ -60,7 +58,13 @@ class PoseDataset(Dataset):
         foots = file_data.get('contact', [None] * len(poses))
 
         for acc, ori, pose, tran, joint, foot in zip(accs, oris, poses, trans, joints, foots):
-            acc, ori = acc[:, :5]/amass.acc_scale, ori[:, :5]
+            # if acc.shape[1] < 7; concat zeros to make it 7 (for 7 IMUs), and do the same for orientation
+            # change acc shape from [N, 5, 3] to [N, 7, 3], and ori shape from [N, 5, 3, 3] to [N, 7, 3, 3]
+            if acc.shape[1] < 7:
+                acc = torch.cat([acc, torch.zeros(acc.shape[0], 7 - acc.shape[1], 3)], dim=1)
+                ori = torch.cat([ori, torch.zeros(ori.shape[0], 7 - ori.shape[1], 3, 3)], dim=1)
+            
+            acc, ori = acc[:, :7]/amass.acc_scale, ori[:, :7] # change: select 7 IMUs
             pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216)) # convert local rotation to global
             pose = pose if self.evaluate else pose_global.view(-1, 24, 3, 3)                # use global only for training
             joint = joint.view(-1, 24, 3)

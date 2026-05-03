@@ -14,9 +14,9 @@ from config import paths, datasets
 # specify target FPS
 TARGET_FPS = 30
 
-# left wrist, right wrist, left thigh, right thigh, head, pelvis
-vi_mask = torch.tensor([1961, 5424, 876, 4362, 411, 3021])
-ji_mask = torch.tensor([18, 19, 1, 2, 15, 0])
+# left wrist, right wrist, left thigh, right thigh, head, left foot, right foot
+vi_mask = torch.tensor([1961, 5424, 876, 4362, 411, 3365, 6765])
+ji_mask = torch.tensor([18, 19, 1, 2, 15, 7, 8])
 body_model = ParametricModel(paths.smpl_file)
 
 def _syn_acc(v, smooth_n=4):
@@ -105,10 +105,10 @@ def process_amass():
             out_tran.append(tran[b:b + l].clone())  # N, 3
             out_shape.append(shape[i].clone())  # 10
             out_joint.append(joint[:, :24].contiguous().clone())  # N, 24, 3
-            out_vacc.append(_syn_acc(vert[:, vi_mask]))  # N, 6, 3
+            out_vacc.append(_syn_acc(vert[:, vi_mask]))  # N, 7, 3
             out_contact.append(_foot_ground_probs(joint).clone()) # N, 2
 
-            out_vrot.append(grot[:, ji_mask])  # N, 6, 3, 3
+            out_vrot.append(grot[:, ji_mask])  # N, 7, 3, 3
             b += l
 
         print("Saving...")
@@ -348,13 +348,13 @@ def get_sorted_files(data_dir):
 def process_huawei(split: str="train"):
     """Preprocess the IMUPoser dataset"""
 
-    train_split = ['hyq_0402', 'yl_0403', 'lisha_0407', 'huohuo_0407']
+    train_split = ['hyq_0402', 'yl_0403', 'lisha_0407', 'huohuo_0407', 'yinqi_0408', 'yanyu_0408', 'liran_0408']
     test_split = ['xinrui_0407']
     subjects = train_split if split == "train" else test_split
 
     accs, oris, poses, trans = [], [], [], []
     
-    last_crop = 2 * 60 * 30
+    length = 2 * 60 * 30  # 2 minutes of data at 30 FPS
     for pid_path in sorted(paths.raw_huawei.iterdir()):
         if pid_path.name not in subjects:
             continue
@@ -365,22 +365,22 @@ def process_huawei(split: str="train"):
 
             fdata = torch.load(fpath)
             
-            acc  = fdata['aM'][:, :5].view(-1, 5, 3)
-            ori  = fdata['RMB'][:, :5].view(-1, 5, 3, 3)
+            acc  = fdata['aM'][:, :7].view(-1, 7, 3)
+            ori  = fdata['RMB'][:, :7].view(-1, 7, 3, 3)
             pose = fdata['pose_gt'].view(-1, 24, 3, 3)
             tran = fdata['tran_gt'].view(-1, 3)
 
             # crop the last few frames which contain too much noise
-            acc = acc[:-last_crop]
-            ori = ori[:-last_crop]
-            pose = pose[:-last_crop]
-            tran = tran[:-last_crop]
+            acc = acc[:length]
+            ori = ori[:length]
+            pose = pose[:length]
+            tran = tran[:length]
             
             # ensure sizes are consistent
             assert tran.shape[0] == pose.shape[0]
 
-            accs.append(acc)    # N, 5, 3
-            oris.append(ori)    # N, 5, 3, 3
+            accs.append(acc)    # N, 7, 3
+            oris.append(ori)    # N, 7, 3, 3
             poses.append(pose)  # N, 24, 3, 3
             trans.append(tran)  # N, 3
 
