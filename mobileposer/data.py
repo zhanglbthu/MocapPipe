@@ -113,6 +113,193 @@ class PoseDataset(Dataset):
     def __len__(self):
         return len(self.data['imu_inputs'])
 
+
+class DiffusionPoseDataset(Dataset):
+    """Dataset for DiffusionPoser-style sequence generation.
+
+    Training follows the original DiffusionPoser setup: each sample contains
+    the full clean motion state `x0`. Sensor-combination masks are constructed
+    only during inpainting inference.
+    """
+
+    pose_dim = 24 * 6
+    acc_dim = 7 * 3
+    ori_dim = 7 * 9
+    root_vel_dim = 3
+    root_y_dim = 1
+    contact_dim = 2
+
+    def __init__(
+        self,
+        fold: str = 'train',
+        evaluate: str = None,
+        window_length: int = None,
+    ):
+        super().__init__()
+        self.fold = fold
+        self.evaluate = evaluate
+        self.window_length = window_length or datasets.window_length
+        self.bodymodel = art.model.ParametricModel(paths.smpl_file)
+        self.data = self._prepare_dataset()
+
+    @property
+    def state_dim(self):
+        return (
+            self.pose_dim
+            + self.acc_dim
+            + self.ori_dim
+            + self.root_vel_dim
+            + self.root_y_dim
+            + self.contact_dim
+        )
+
+    @property
+    def pose_slice(self):
+        return slice(0, self.pose_dim)
+
+    @property
+    def acc_slice(self):
+        start = self.pose_dim
+        return slice(start, start + self.acc_dim)
+
+    @property
+    def ori_slice(self):
+        start = self.pose_dim + self.acc_dim
+        return slice(start, start + self.ori_dim)
+
+    @property
+    def root_vel_slice(self):
+        start = self.pose_dim + self.acc_dim + self.ori_dim
+        return slice(start, start + self.root_vel_dim)
+
+    @property
+    def root_y_slice(self):
+        start = self.root_vel_slice.stop
+        return slice(start, start + self.root_y_dim)
+
+    @property
+    def contact_slice(self):
+        start = self.root_y_slice.stop
+        return slice(start, start + self.contact_dim)
+
+    def _get_data_files(self, data_folder):
+        if self.fold == 'train':
+            return [x.name for x in data_folder.iterdir() if not x.is_dir()]
+        if self.fold == 'test':
+            return [datasets.test_datasets[self.evaluate]]
+        raise ValueError(f"Unknown data fold: {self.fold}.")
+
+    def _prepare_dataset(self):
+        data_folder = paths.processed_datasets / ('eval' if self.evaluate else '')
+        data_files = self._get_data_files(data_folder)
+        data = {
+            key: []
+            for key in [
+                'x0',
+                'pose',
+                'joint',
+                'tran',
+                'contact',
+            ]
+        }
+
+        for data_file in tqdm(data_files):
+            file_data = torch.load(data_folder / data_file)
+            self._process_file_data(file_data, data)
+        return data
+
+    def _pad_imus(self, acc, ori):
+        if acc.shape[1] < 7:
+            acc = torch.cat([acc, torch.zeros(acc.shape[0], 7 - acc.shape[1], 3)], dim=1)
+            ori = torch.cat([ori, torch.zeros(ori.shape[0], 7 - ori.shape[1], 3, 3)], dim=1)
+        return acc[:, :7] / amass.acc_scale, ori[:, :7]
+
+    def _get_global_pose_and_joint(self, pose):
+        pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216))
+        return pose_global.view(-1, 24, 3, 3), joint.view(-1, 24, 3)
+
+    def _get_contact(self, contact, joint):
+        if contact is not None:
+            return contact.float()
+
+        dist_lfeet = torch.norm(joint[1:, 10] - joint[:-1, 10], dim=1)
+        dist_rfeet = torch.norm(joint[1:, 11] - joint[:-1, 11], dim=1)
+        lfoot_contact = torch.cat((torch.zeros(1), (dist_lfeet < 0.008).float()))
+        rfoot_contact = torch.cat((torch.zeros(1), (dist_rfeet < 0.008).float()))
+        return torch.stack((lfoot_contact, rfoot_contact), dim=1)
+
+    def _build_state(self, pose, acc, ori, tran, contact):
+        pose_6d = art.math.rotation_matrix_to_r6d(pose).reshape(pose.shape[0], -1)
+        root_vel = torch.cat((torch.zeros(1, 3), tran[1:] - tran[:-1]))
+        root_vel = root_vel * (datasets.fps / amass.vel_scale)
+        root_y = tran[:, 1:2]
+        return torch.cat(
+            [
+                pose_6d,
+                acc.flatten(1),
+                ori.flatten(1),
+                root_vel,
+                root_y,
+                contact,
+            ],
+            dim=1,
+        )
+
+    def _process_file_data(self, file_data, data):
+        accs, oris, poses, trans = file_data['acc'], file_data['ori'], file_data['pose'], file_data['tran']
+        foots = file_data.get('contact', [None] * len(poses))
+
+        for acc, ori, pose, tran, foot in zip(accs, oris, poses, trans, foots):
+            acc, ori = self._pad_imus(acc, ori)
+            pose, joint = self._get_global_pose_and_joint(pose)
+            contact = self._get_contact(foot, joint)
+            x0 = self._build_state(pose, acc, ori, tran, contact)
+
+            data_len = len(x0) if self.evaluate else self.window_length
+            x0_chunks = torch.split(x0, data_len)
+            pose_chunks = torch.split(pose, data_len)
+            joint_chunks = torch.split(joint, data_len)
+            tran_chunks = torch.split(tran, data_len)
+            contact_chunks = torch.split(contact, data_len)
+
+            for x_chunk, pose_chunk, joint_chunk, tran_chunk, contact_chunk in zip(
+                x0_chunks,
+                pose_chunks,
+                joint_chunks,
+                tran_chunks,
+                contact_chunks,
+            ):
+                data['x0'].append(x_chunk)
+                data['pose'].append(pose_chunk)
+                data['joint'].append(joint_chunk)
+                data['tran'].append(tran_chunk)
+                data['contact'].append(contact_chunk)
+
+    def __getitem__(self, idx):
+        return {
+            'x0': self.data['x0'][idx].float(),
+            'pose': self.data['pose'][idx].float(),
+            'joint': self.data['joint'][idx].float(),
+            'tran': self.data['tran'][idx].float(),
+            'contact': self.data['contact'][idx].float(),
+        }
+
+    def __len__(self):
+        return len(self.data['x0'])
+
+
+def pad_diffusion_seq(batch):
+    """Pad variable-length diffusion samples."""
+    tensor_keys = ['x0', 'pose', 'joint', 'tran', 'contact']
+    out = {}
+
+    for key in tensor_keys:
+        sequences = [item[key] for item in batch]
+        out[key] = nn.utils.rnn.pad_sequence(sequences, batch_first=True)
+        out[f'{key}_lengths'] = [seq.shape[0] for seq in sequences]
+
+    return out
+
 def pad_seq(batch):
     """Pad sequences to same length for RNN."""
     def _pad(sequence):
@@ -166,6 +353,41 @@ class PoseDataModule(L.LightningDataModule):
             num_workers=self.hypers.num_workers, 
             shuffle=True, 
             drop_last=True
+        )
+
+    def train_dataloader(self):
+        return self._dataloader(self.train_dataset)
+
+    def val_dataloader(self):
+        return self._dataloader(self.val_dataset)
+
+    def test_dataloader(self):
+        return self._dataloader(self.test_dataset)
+
+
+class DiffusionPoseDataModule(L.LightningDataModule):
+    def __init__(self, evaluate: str = None):
+        super().__init__()
+        self.evaluate = evaluate
+        self.hypers = train_hypers
+
+    def setup(self, stage: str):
+        if stage == 'fit':
+            dataset = DiffusionPoseDataset(fold='train')
+            train_size = int(0.9 * len(dataset))
+            val_size = len(dataset) - train_size
+            self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
+        elif stage == 'test':
+            self.test_dataset = DiffusionPoseDataset(fold='test', evaluate=self.evaluate)
+
+    def _dataloader(self, dataset):
+        return DataLoader(
+            dataset,
+            batch_size=self.hypers.batch_size,
+            collate_fn=pad_diffusion_seq,
+            num_workers=self.hypers.num_workers,
+            shuffle=True,
+            drop_last=True,
         )
 
     def train_dataloader(self):

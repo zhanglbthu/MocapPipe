@@ -61,27 +61,27 @@ class amass:
     # device-location combinationsa
     combos_full = {
         # # leaf device
-        # 'lw_rw_lp_rp_h_feet': [0, 1, 2, 3, 4, 5, 6],
+        'lw_rw_lp_rp_h_feet': [0, 1, 2, 3, 4, 5, 6],
         'lw_rw_lp_rp_h': [0, 1, 2, 3, 4],
-        # 'lw_rw_lp_rp': [0, 1, 2, 3],
-        # 'lw_rw_h_feet': [0, 1, 4, 5, 6],
-        # 'lw_rw_feet': [0, 1, 5, 6],
+        'lw_rw_lp_rp': [0, 1, 2, 3],
+        'lw_rw_h_feet': [0, 1, 4, 5, 6],
+        'lw_rw_feet': [0, 1, 5, 6],
         
-        # # five devices
-        # 'lw_rp_h_feet': [0, 3, 4, 5, 6],
-        # 'rw_rp_h_feet': [1, 3, 4, 5, 6],
-        # 'lw_lp_h_feet': [0, 2, 4, 5, 6],
-        # 'rw_lp_h_feet': [1, 2, 4, 5, 6],
-        # # three devices
-        # 'lw_rp_h': [0, 3, 4],
-        # 'rw_rp_h': [1, 3, 4],
-        # 'lw_lp_h': [0, 2, 4],
-        # 'rw_lp_h': [1, 2, 4],
-        # # two devices
-        # 'lw_rp': [0, 3],
-        # 'rw_rp': [1, 3],
-        # 'lw_lp': [0, 2],
-        # 'rw_lp': [1, 2],
+        # five devices
+        'lw_rp_h_feet': [0, 3, 4, 5, 6],
+        'rw_rp_h_feet': [1, 3, 4, 5, 6],
+        'lw_lp_h_feet': [0, 2, 4, 5, 6],
+        'rw_lp_h_feet': [1, 2, 4, 5, 6],
+        # three devices
+        'lw_rp_h': [0, 3, 4],
+        'rw_rp_h': [1, 3, 4],
+        'lw_lp_h': [0, 2, 4],
+        'rw_lp_h': [1, 2, 4],
+        # two devices
+        'lw_rp': [0, 3],
+        'rw_rp': [1, 3],
+        'lw_lp': [0, 2],
+        'rw_lp': [1, 2],
      }
     
     acc_scale = 30
