@@ -124,7 +124,6 @@ class DiffusionPoseDataset(Dataset):
 
     pose_dim = 24 * 6
     acc_dim = 7 * 3
-    ori_dim = 7 * 9
     root_vel_dim = 3
     root_y_dim = 1
     contact_dim = 2
@@ -147,7 +146,6 @@ class DiffusionPoseDataset(Dataset):
         return (
             self.pose_dim
             + self.acc_dim
-            + self.ori_dim
             + self.root_vel_dim
             + self.root_y_dim
             + self.contact_dim
@@ -163,13 +161,8 @@ class DiffusionPoseDataset(Dataset):
         return slice(start, start + self.acc_dim)
 
     @property
-    def ori_slice(self):
-        start = self.pose_dim + self.acc_dim
-        return slice(start, start + self.ori_dim)
-
-    @property
     def root_vel_slice(self):
-        start = self.pose_dim + self.acc_dim + self.ori_dim
+        start = self.pose_dim + self.acc_dim
         return slice(start, start + self.root_vel_dim)
 
     @property
@@ -203,16 +196,16 @@ class DiffusionPoseDataset(Dataset):
             ]
         }
 
-        for data_file in tqdm(data_files):
+        for data_file in tqdm(data_files, desc="Loading diffusion data files"):
             file_data = torch.load(data_folder / data_file)
-            self._process_file_data(file_data, data)
+            self._process_file_data(file_data, data, data_file)
         return data
 
     def _pad_imus(self, acc, ori):
         if acc.shape[1] < 7:
             acc = torch.cat([acc, torch.zeros(acc.shape[0], 7 - acc.shape[1], 3)], dim=1)
             ori = torch.cat([ori, torch.zeros(ori.shape[0], 7 - ori.shape[1], 3, 3)], dim=1)
-        return acc[:, :7] / amass.acc_scale, ori[:, :7]
+        return acc[:, :7] / amass.acc_scale
 
     def _get_global_pose_and_joint(self, pose):
         pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216))
@@ -228,7 +221,7 @@ class DiffusionPoseDataset(Dataset):
         rfoot_contact = torch.cat((torch.zeros(1), (dist_rfeet < 0.008).float()))
         return torch.stack((lfoot_contact, rfoot_contact), dim=1)
 
-    def _build_state(self, pose, acc, ori, tran, contact):
+    def _build_state(self, pose, acc, tran, contact):
         pose_6d = art.math.rotation_matrix_to_r6d(pose).reshape(pose.shape[0], -1)
         root_vel = torch.cat((torch.zeros(1, 3), tran[1:] - tran[:-1]))
         root_vel = root_vel * (datasets.fps / amass.vel_scale)
@@ -237,7 +230,6 @@ class DiffusionPoseDataset(Dataset):
             [
                 pose_6d,
                 acc.flatten(1),
-                ori.flatten(1),
                 root_vel,
                 root_y,
                 contact,
@@ -245,15 +237,17 @@ class DiffusionPoseDataset(Dataset):
             dim=1,
         )
 
-    def _process_file_data(self, file_data, data):
+    def _process_file_data(self, file_data, data, data_file=None):
         accs, oris, poses, trans = file_data['acc'], file_data['ori'], file_data['pose'], file_data['tran']
         foots = file_data.get('contact', [None] * len(poses))
+        sequences = zip(accs, oris, poses, trans, foots)
+        desc = f"Processing {data_file}" if data_file else "Processing diffusion sequences"
 
-        for acc, ori, pose, tran, foot in zip(accs, oris, poses, trans, foots):
-            acc, ori = self._pad_imus(acc, ori)
+        for acc, ori, pose, tran, foot in tqdm(sequences, total=len(poses), desc=desc, leave=False):
+            acc = self._pad_imus(acc, ori)
             pose, joint = self._get_global_pose_and_joint(pose)
             contact = self._get_contact(foot, joint)
-            x0 = self._build_state(pose, acc, ori, tran, contact)
+            x0 = self._build_state(pose, acc, tran, contact)
 
             data_len = len(x0) if self.evaluate else self.window_length
             x0_chunks = torch.split(x0, data_len)
@@ -380,13 +374,13 @@ class DiffusionPoseDataModule(L.LightningDataModule):
         elif stage == 'test':
             self.test_dataset = DiffusionPoseDataset(fold='test', evaluate=self.evaluate)
 
-    def _dataloader(self, dataset):
+    def _dataloader(self, dataset, shuffle=True):
         return DataLoader(
             dataset,
             batch_size=self.hypers.batch_size,
             collate_fn=pad_diffusion_seq,
             num_workers=self.hypers.num_workers,
-            shuffle=True,
+            shuffle=shuffle,
             drop_last=True,
         )
 
@@ -394,7 +388,7 @@ class DiffusionPoseDataModule(L.LightningDataModule):
         return self._dataloader(self.train_dataset)
 
     def val_dataloader(self):
-        return self._dataloader(self.val_dataset)
+        return self._dataloader(self.val_dataset, shuffle=False)
 
     def test_dataloader(self):
-        return self._dataloader(self.test_dataset)
+        return self._dataloader(self.test_dataset, shuffle=False)
