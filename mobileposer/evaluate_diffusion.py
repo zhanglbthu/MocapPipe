@@ -8,6 +8,47 @@ from config import datasets, model_config
 from data import DiffusionPoseDataset
 from diffusionposer import DiffusionPoser, DiffusionPoserConfig, DiffusionPoserInference
 from evaluate import PoseEvaluator
+from utils.file_utils import get_best_checkpoint
+
+
+def resolve_checkpoint(args):
+    if args.model:
+        return Path(args.model)
+
+    if args.checkpoint_dir:
+        checkpoint_dir = Path(args.checkpoint_dir)
+    elif args.run_dir:
+        run_dir = Path(args.run_dir)
+        checkpoint_dir = run_dir if run_dir.name == "diffusionposer" else run_dir / "diffusionposer"
+    else:
+        raise ValueError("Provide either --model, --checkpoint-dir, or --run-dir.")
+
+    best_checkpoint = get_best_checkpoint(str(checkpoint_dir))
+    if best_checkpoint is None:
+        raise FileNotFoundError(f"No validation checkpoints found in {checkpoint_dir}")
+    checkpoint_path = checkpoint_dir / best_checkpoint
+    print(f"Using best checkpoint: {checkpoint_path}")
+    return checkpoint_path
+
+
+def build_save_dir(args, checkpoint_path):
+    if args.save_dir:
+        save_dir = Path(args.save_dir)
+    else:
+        checkpoint_dir = checkpoint_path.parent
+        run_name = checkpoint_dir.parent.name if checkpoint_dir.name == "diffusionposer" else checkpoint_dir.name
+        save_dir = (
+            Path("data")
+            / "eval"
+            / "diffusionposer"
+            / args.dataset
+            / args.combo
+            / run_name
+            / f"steps_{args.num_steps}"
+        )
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    return save_dir
 
 
 def load_diffusion_model(checkpoint_path, args):
@@ -64,7 +105,7 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
         )
 
     errors = torch.stack(pose_errs)
-    summary = torch.stack((errors.mean(dim=0), errors.std(dim=0)), dim=1)
+    summary = errors.mean(dim=0)
     PoseEvaluator.print(summary)
 
     with open(save_dir / "log.txt", "w") as f:
@@ -72,12 +113,14 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
             PoseEvaluator.print(summary)
         for i, err in enumerate(errors):
             print(f"Sample {i + 1}", file=f)
-            PoseEvaluator.print_single(torch.stack((err, torch.zeros_like(err)), dim=1), file=f)
+            PoseEvaluator.print_single(err, file=f)
 
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--run-dir", type=str, default=None)
+    parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument("--dataset", type=str, default="huawei")
     parser.add_argument("--combo", type=str, default="lw_rp")
     parser.add_argument("--num-steps", type=int, default=10)
@@ -99,10 +142,11 @@ def main():
     if args.dataset not in datasets.test_datasets:
         raise ValueError(f"Test dataset {args.dataset} not found.")
 
-    save_dir = Path(args.save_dir) if args.save_dir else Path("data") / "eval" / args.dataset / args.combo / "diffusionposer"
-    save_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = resolve_checkpoint(args)
+    save_dir = build_save_dir(args, checkpoint_path)
+    print(f"Saving evaluation outputs to: {save_dir}")
 
-    model = load_diffusion_model(args.model, args)
+    model = load_diffusion_model(checkpoint_path, args)
     dataset = DiffusionPoseDataset(fold='test', evaluate=args.dataset, window_length=args.window_length)
     evaluate_diffusion(model, dataset, args.combo, save_dir, num_steps=args.num_steps, max_samples=args.max_samples)
 
