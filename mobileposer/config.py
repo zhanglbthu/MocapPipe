@@ -26,9 +26,14 @@ class finetune_hypers:
 class paths:
     """Relevant paths for MobilePoser. Change as necessary."""
     root_dir = Path().absolute()
-    checkpoint = root_dir / "checkpoints"
+    data_dir = root_dir / "data"
+    checkpoint = data_dir / "checkpoints"
+    experiments_dir = data_dir / "experiments"
+    paper_dir = data_dir / "paper"
+    eval_output_dir = data_dir / "eval"
+    video_output_dir = data_dir / "video"
     smpl_file = root_dir / "smpl/basicmodel_m.pkl"
-    weights_file = root_dir / "checkpoints/weights.pth"
+    weights_file = checkpoint / "weights.pth"
     raw_amass = Path("/root/autodl-tmp/dataset/raw/AMASS")           # TODO: replace with your path
     # raw_dip = Path("/data/projects/Pose/raw/DIP_IMU")           # TODO: replace with your path
     raw_imuposer = Path("/root/autodl-tmp/dataset/raw/IMUPoser")     # TODO: replace with your path\

@@ -133,11 +133,13 @@ class DiffusionPoseDataset(Dataset):
         fold: str = 'train',
         evaluate: str = None,
         window_length: int = None,
+        data_file_limit: int = None,
     ):
         super().__init__()
         self.fold = fold
         self.evaluate = evaluate
         self.window_length = window_length or datasets.window_length
+        self.data_file_limit = data_file_limit
         self.bodymodel = art.model.ParametricModel(paths.smpl_file)
         self.data = self._prepare_dataset()
 
@@ -177,7 +179,10 @@ class DiffusionPoseDataset(Dataset):
 
     def _get_data_files(self, data_folder):
         if self.fold == 'train':
-            return [x.name for x in data_folder.iterdir() if not x.is_dir()]
+            files = sorted([x.name for x in data_folder.iterdir() if not x.is_dir()])
+            if self.data_file_limit is not None:
+                files = files[:self.data_file_limit]
+            return files
         if self.fold == 'test':
             return [datasets.test_datasets[self.evaluate]]
         raise ValueError(f"Unknown data fold: {self.fold}.")
@@ -360,14 +365,15 @@ class PoseDataModule(L.LightningDataModule):
 
 
 class DiffusionPoseDataModule(L.LightningDataModule):
-    def __init__(self, evaluate: str = None):
+    def __init__(self, evaluate: str = None, train_data_file_limit: int = None):
         super().__init__()
         self.evaluate = evaluate
+        self.train_data_file_limit = train_data_file_limit
         self.hypers = train_hypers
 
     def setup(self, stage: str):
         if stage == 'fit':
-            dataset = DiffusionPoseDataset(fold='train')
+            dataset = DiffusionPoseDataset(fold='train', data_file_limit=self.train_data_file_limit)
             train_size = int(0.9 * len(dataset))
             val_size = len(dataset) - train_size
             self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])

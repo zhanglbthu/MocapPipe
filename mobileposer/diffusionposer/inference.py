@@ -119,7 +119,22 @@ class DiffusionPoserInference:
 
     def state_to_tran(self, state):
         root_vel = state[:, self.layout.root_vel_slice] / (datasets.fps / amass.vel_scale)
-        tran = torch.cumsum(root_vel, dim=0)
+        deterministic_enabled = torch.are_deterministic_algorithms_enabled()
+        warn_only = (
+            torch.is_deterministic_algorithms_warn_only_enabled()
+            if hasattr(torch, "is_deterministic_algorithms_warn_only_enabled")
+            else False
+        )
+
+        if deterministic_enabled and root_vel.is_cuda:
+            torch.use_deterministic_algorithms(False)
+            try:
+                tran = torch.cumsum(root_vel, dim=0)
+            finally:
+                torch.use_deterministic_algorithms(True, warn_only=warn_only)
+        else:
+            tran = torch.cumsum(root_vel, dim=0)
+
         tran[:, 1:2] = state[:, self.layout.root_y_slice]
         return tran
 

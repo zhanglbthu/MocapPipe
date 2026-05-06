@@ -12,6 +12,7 @@ from argparse import ArgumentParser
 
 from models import MobilePoserNet, Poser, Joints, Velocity, FootContact
 from constants import MODULES
+from config import paths
 from utils.file_utils import get_file_number, get_best_checkpoint
 
 
@@ -24,7 +25,7 @@ def load_module_weights(module_name, weight_path):
 
 
 def get_module_path(module_name, checkpoint, finetune=None):
-    module_path = Path("checkpoints") / str(checkpoint)
+    module_path = paths.checkpoint / str(checkpoint)
     if args.finetune and module_name in ["poser", "joints"]:
         module_path = module_path / f"finetuned_{finetune}" / module_name
     else:
@@ -52,6 +53,6 @@ if __name__ == "__main__":
     # load combined model and save
     model_name = "base_model.pth" if not args.finetune else "model_finetuned.pth"
     model = MobilePoserNet(**checkpoints)
-    model_path = Path("checkpoints") / str(args.checkpoint) / model_name
+    model_path = paths.checkpoint / str(args.checkpoint) / model_name
     torch.save(model.state_dict(), model_path)
     print(f"Model written to {model_path}.")

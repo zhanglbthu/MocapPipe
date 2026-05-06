@@ -56,14 +56,14 @@ def resolve_output_dir(input_dir, output_dir):
     if output_dir is not None:
         return Path(output_dir)
 
-    repo_root = Path.cwd()
-    eval_root = (repo_root / "data" / "eval").resolve()
+    repo_root = paths.root_dir
+    eval_root = paths.eval_output_dir.resolve()
     input_abs = input_dir.resolve()
     if input_abs.is_relative_to(eval_root):
         relative = input_abs.relative_to(eval_root)
-        return repo_root / "data" / "video" / relative
+        return paths.video_output_dir / relative
 
-    return repo_root / "data" / "video" / input_dir.name
+    return paths.video_output_dir / input_dir.name
 
 
 def maybe_zero_translation(pose, tran, visualize_tran):

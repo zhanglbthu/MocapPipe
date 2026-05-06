@@ -26,9 +26,12 @@ class PoseEvaluator:
         else:
             tran_p = torch.zeros(pose_p.shape[0], 3, device=pose_p.device)
             tran_t = torch.zeros(pose_t.shape[0], 3, device=pose_t.device)
-            
-        pose_p[:, joint_set.ignored] = torch.eye(3, device=pose_p.device)
-        pose_t[:, joint_set.ignored] = torch.eye(3, device=pose_t.device)
+
+        ignored = torch.tensor(joint_set.ignored, device=pose_p.device, dtype=torch.long)
+        identity_p = torch.eye(3, device=pose_p.device).view(1, 1, 3, 3).expand(pose_p.shape[0], len(joint_set.ignored), 3, 3)
+        identity_t = torch.eye(3, device=pose_t.device).view(1, 1, 3, 3).expand(pose_t.shape[0], len(joint_set.ignored), 3, 3)
+        pose_p = pose_p.index_copy(1, ignored, identity_p)
+        pose_t = pose_t.index_copy(1, ignored.to(pose_t.device), identity_t)
 
         errs = self._eval_fn(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t)
         return torch.stack([errs[9], errs[3], errs[9], errs[0]*100, errs[7]*100, errs[1]*100, errs[4] / 100, errs[6]])

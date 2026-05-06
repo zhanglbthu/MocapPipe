@@ -1,10 +1,12 @@
 import torch
+import json
+import csv
 from argparse import ArgumentParser
 from contextlib import redirect_stdout
 from pathlib import Path
 from tqdm import tqdm
 
-from config import datasets, model_config
+from config import datasets, model_config, paths
 from data import DiffusionPoseDataset
 from diffusionposer import DiffusionPoser, DiffusionPoserConfig, DiffusionPoserInference
 from evaluate import PoseEvaluator
@@ -38,8 +40,7 @@ def build_save_dir(args, checkpoint_path):
         checkpoint_dir = checkpoint_path.parent
         run_name = checkpoint_dir.parent.name if checkpoint_dir.name == "diffusionposer" else checkpoint_dir.name
         save_dir = (
-            Path("data")
-            / "eval"
+            paths.eval_output_dir
             / "diffusionposer"
             / args.dataset
             / args.combo
@@ -71,6 +72,40 @@ def load_diffusion_model(checkpoint_path, args):
     return model
 
 
+def metric_names():
+    return [
+        "sip_error_deg",
+        "angular_error_deg",
+        "masked_angular_error_deg",
+        "positional_error_cm",
+        "masked_positional_error_cm",
+        "mesh_error_cm",
+        "jitter_error_100m_s3",
+        "distance_error_cm",
+    ]
+
+
+def write_per_sequence_metrics(save_dir, errors, sequence_lengths):
+    csv_path = save_dir / "metrics_per_sequence.csv"
+    names = metric_names()
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["sequence_id", "num_frames", *names])
+        for idx, (err, seq_len) in enumerate(zip(errors, sequence_lengths), start=1):
+            writer.writerow([idx, int(seq_len), *[float(v) for v in err[:, 0].tolist()]])
+
+
+def write_summary_metrics(save_dir, summary):
+    payload = {}
+    for idx, name in enumerate(metric_names()):
+        payload[name] = {
+            "mean": float(summary[idx, 0].item()),
+            "std": float(summary[idx, 1].item()),
+        }
+    with open(save_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 @torch.no_grad()
 def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_samples=None):
     device = model_config.device
@@ -80,6 +115,7 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
     inference = DiffusionPoserInference(model, num_steps=num_steps)
     evaluator = PoseEvaluator()
     pose_errs = []
+    sequence_lengths = []
 
     sample_count = len(dataset) if max_samples is None else min(len(dataset), max_samples)
     for idx in tqdm(range(sample_count), desc=f"Evaluating {combo}"):
@@ -92,6 +128,7 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
         pose_p = inference.state_to_pose(pred_state)
         tran_p = inference.state_to_tran(pred_state)
         pose_errs.append(evaluator.eval(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t))
+        sequence_lengths.append(int(pose_t.shape[0]))
 
         torch.save(
             {
@@ -107,6 +144,8 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
     errors = torch.stack(pose_errs)
     summary = errors.mean(dim=0)
     PoseEvaluator.print(summary)
+    write_per_sequence_metrics(save_dir, errors, sequence_lengths)
+    write_summary_metrics(save_dir, summary)
 
     with open(save_dir / "log.txt", "w") as f:
         with redirect_stdout(f):
