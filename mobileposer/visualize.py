@@ -1,5 +1,7 @@
 import argparse
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -145,6 +147,13 @@ class AITViewerVideoRenderer:
             for node in nodes:
                 viewer.scene.add(node)
             viewer._init_scene()
+            # AITViewer defaults both the scene timeline and playback speed to
+            # 60 FPS. If we export at 30 FPS while leaving playback at 60, the
+            # exporter subsamples the animation and drops roughly half the
+            # frames.
+            viewer.scene.fps = self.fps
+            viewer.playback_fps = self.fps
+            viewer.export_fps = self.fps
             viewer.scene.camera.target = np.array([0.0, 0.9, 0.0], dtype=np.float32)
             viewer.scene.camera.position = np.array([0.0, 0.2, 5.2], dtype=np.float32)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +220,41 @@ def main():
     seq_files = list_sequence_files(input_dir, args.sequence)
     if not seq_files:
         raise FileNotFoundError(f"No numeric sequence .pt files found in {input_dir}")
+
+    # AITViewer/OpenGL resources can be tied to a single context. Rendering each
+    # sequence in a fresh subprocess avoids cross-sequence context reuse issues.
+    if args.sequence is None and len(seq_files) > 1:
+        base_cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--fps",
+            str(args.fps),
+            "--stride",
+            str(args.stride),
+            "--image-width",
+            str(args.image_width),
+            "--image-height",
+            str(args.image_height),
+            "--face-stride",
+            str(args.face_stride),
+            "--subject-spacing",
+            str(args.subject_spacing),
+            "--batch-size",
+            str(args.batch_size),
+        ]
+        if args.max_frames is not None:
+            base_cmd.extend(["--max-frames", str(args.max_frames)])
+        if args.visualize_tran:
+            base_cmd.append("--visualize-tran")
+
+        for seq_path in seq_files:
+            seq_cmd = base_cmd + ["--sequence", seq_path.stem]
+            subprocess.run(seq_cmd, check=True)
+        return
 
     body_model = art.ParametricModel(paths.smpl_file)
     for seq_path in seq_files:

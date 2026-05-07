@@ -198,6 +198,8 @@ class DiffusionPoseDataset(Dataset):
                 'joint',
                 'tran',
                 'contact',
+                'acc',
+                'ori',
             ]
         }
 
@@ -210,7 +212,7 @@ class DiffusionPoseDataset(Dataset):
         if acc.shape[1] < 7:
             acc = torch.cat([acc, torch.zeros(acc.shape[0], 7 - acc.shape[1], 3)], dim=1)
             ori = torch.cat([ori, torch.zeros(ori.shape[0], 7 - ori.shape[1], 3, 3)], dim=1)
-        return acc[:, :7] / amass.acc_scale
+        return acc[:, :7] / amass.acc_scale, ori[:, :7]
 
     def _get_global_pose_and_joint(self, pose):
         pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216))
@@ -249,7 +251,7 @@ class DiffusionPoseDataset(Dataset):
         desc = f"Processing {data_file}" if data_file else "Processing diffusion sequences"
 
         for acc, ori, pose, tran, foot in tqdm(sequences, total=len(poses), desc=desc, leave=False):
-            acc = self._pad_imus(acc, ori)
+            acc, ori = self._pad_imus(acc, ori)
             pose, joint = self._get_global_pose_and_joint(pose)
             contact = self._get_contact(foot, joint)
             x0 = self._build_state(pose, acc, tran, contact)
@@ -260,19 +262,25 @@ class DiffusionPoseDataset(Dataset):
             joint_chunks = torch.split(joint, data_len)
             tran_chunks = torch.split(tran, data_len)
             contact_chunks = torch.split(contact, data_len)
+            acc_chunks = torch.split(acc, data_len)
+            ori_chunks = torch.split(ori, data_len)
 
-            for x_chunk, pose_chunk, joint_chunk, tran_chunk, contact_chunk in zip(
+            for x_chunk, pose_chunk, joint_chunk, tran_chunk, contact_chunk, acc_chunk, ori_chunk in zip(
                 x0_chunks,
                 pose_chunks,
                 joint_chunks,
                 tran_chunks,
                 contact_chunks,
+                acc_chunks,
+                ori_chunks,
             ):
                 data['x0'].append(x_chunk)
                 data['pose'].append(pose_chunk)
                 data['joint'].append(joint_chunk)
                 data['tran'].append(tran_chunk)
                 data['contact'].append(contact_chunk)
+                data['acc'].append(acc_chunk)
+                data['ori'].append(ori_chunk)
 
     def __getitem__(self, idx):
         return {
@@ -281,6 +289,8 @@ class DiffusionPoseDataset(Dataset):
             'joint': self.data['joint'][idx].float(),
             'tran': self.data['tran'][idx].float(),
             'contact': self.data['contact'][idx].float(),
+            'acc': self.data['acc'][idx].float(),
+            'ori': self.data['ori'][idx].float(),
         }
 
     def __len__(self):
@@ -373,11 +383,15 @@ class DiffusionPoseDataModule(L.LightningDataModule):
 
     def setup(self, stage: str):
         if stage == 'fit':
+            if hasattr(self, 'train_dataset') and hasattr(self, 'val_dataset'):
+                return
             dataset = DiffusionPoseDataset(fold='train', data_file_limit=self.train_data_file_limit)
             train_size = int(0.9 * len(dataset))
             val_size = len(dataset) - train_size
             self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
         elif stage == 'test':
+            if hasattr(self, 'test_dataset'):
+                return
             self.test_dataset = DiffusionPoseDataset(fold='test', evaluate=self.evaluate)
 
     def _dataloader(self, dataset, shuffle=True):
@@ -398,3 +412,39 @@ class DiffusionPoseDataModule(L.LightningDataModule):
 
     def test_dataloader(self):
         return self._dataloader(self.test_dataset, shuffle=False)
+
+    def get_normalization_stats(self):
+        if hasattr(self, "_normalization_stats"):
+            return self._normalization_stats
+
+        if not hasattr(self, "train_dataset"):
+            raise RuntimeError("Call setup('fit') before requesting normalization stats.")
+
+        state_dim = self.train_dataset[0]["x0"].shape[-1]
+        total_count = 0
+        total_sum = torch.zeros(state_dim)
+        total_sq_sum = torch.zeros(state_dim)
+
+        for sample in tqdm(self.train_dataset, desc="Computing diffusion normalization stats"):
+            x0 = sample["x0"].float().reshape(-1, state_dim)
+            total_sum += x0.sum(dim=0)
+            total_sq_sum += (x0 ** 2).sum(dim=0)
+            total_count += x0.shape[0]
+
+        if total_count == 0:
+            raise RuntimeError("Normalization stats cannot be computed from an empty training dataset.")
+
+        mean = total_sum / total_count
+        var = total_sq_sum / total_count - mean ** 2
+        std = torch.sqrt(var.clamp_min(1e-8))
+
+        contact_slice = self.train_dataset.dataset.contact_slice
+        mean[contact_slice] = 0.0
+        std[contact_slice] = 1.0
+
+        self._normalization_stats = {
+            "mean": mean,
+            "std": std.clamp_min(1e-6),
+            "count": total_count,
+        }
+        return self._normalization_stats

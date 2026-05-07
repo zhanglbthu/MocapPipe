@@ -2,6 +2,8 @@ import torch
 import lightning as L
 import random
 import numpy as np
+import json
+import csv
 from argparse import ArgumentParser
 from lightning.pytorch import seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -41,6 +43,7 @@ class DiffusionBenchmarkCallback(L.Callback):
         every_n_epochs,
         seed,
         window_length,
+        output_root,
     ):
         super().__init__()
         self.dataset_name = dataset_name
@@ -50,6 +53,7 @@ class DiffusionBenchmarkCallback(L.Callback):
         self.every_n_epochs = every_n_epochs
         self.seed = seed
         self.window_length = window_length
+        self.output_root = Path(output_root)
         self.evaluator = PoseEvaluator()
         self.dataset = None
 
@@ -82,6 +86,7 @@ class DiffusionBenchmarkCallback(L.Callback):
         device = pl_module.device
         inference = DiffusionPoserInference(pl_module, num_steps=self.num_steps)
         errors = []
+        per_sequence = []
 
         try:
             pl_module.eval()
@@ -96,10 +101,32 @@ class DiffusionBenchmarkCallback(L.Callback):
                     x0 = sample["x0"].to(device)
                     pose_t = sample["pose"].to(device)
                     tran_t = sample["tran"].to(device)
-                    pred_state = inference.autoregressive(x0, combo=self.combo, num_steps=self.num_steps)
+                    acc_obs = sample["acc"].to(device)
+                    ori_obs = sample["ori"].to(device)
+                    pred_state = inference.autoregressive(
+                        x0,
+                        combo=self.combo,
+                        num_steps=self.num_steps,
+                        acc_obs=acc_obs,
+                        ori_obs=ori_obs,
+                    )
                     pose_p = inference.state_to_pose(pred_state)
                     tran_p = inference.state_to_tran(pred_state)
-                    errors.append(self.evaluator.eval(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t))
+                    err = self.evaluator.eval(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t)
+                    errors.append(err)
+                    per_sequence.append(
+                        {
+                            "sample_order": idx + 1,
+                            "source_index": self.indices[idx],
+                            "num_frames": int(pose_t.shape[0]),
+                            "error": err.cpu(),
+                            "pred_state": pred_state.cpu(),
+                            "pose_p": pose_p.cpu(),
+                            "pose_t": pose_t.cpu(),
+                            "tran_p": tran_p.cpu(),
+                            "tran_t": tran_t.cpu(),
+                        }
+                    )
         finally:
             self._restore_rng_state(states)
             if was_training:
@@ -138,6 +165,8 @@ class DiffusionBenchmarkCallback(L.Callback):
         print("-" * 50)
         print()
 
+        self._save_epoch_outputs(epoch, per_sequence, summary)
+
     @staticmethod
     def _build_subset(dataset, indices):
         zero_based = []
@@ -172,6 +201,74 @@ class DiffusionBenchmarkCallback(L.Callback):
         if torch.cuda.is_available() and states["cuda"] is not None:
             torch.cuda.set_rng_state_all(states["cuda"])
 
+    def _save_epoch_outputs(self, epoch, per_sequence, summary):
+        save_dir = (
+            self.output_root
+            / "benchmark_eval"
+            / self.dataset_name
+            / self.combo
+            / f"epoch_{epoch:03d}"
+        )
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        metric_names = [
+            "sip_error_deg",
+            "angular_error_deg",
+            "masked_angular_error_deg",
+            "positional_error_cm",
+            "masked_positional_error_cm",
+            "mesh_error_cm",
+            "jitter_error_100m_s3",
+            "distance_error_cm",
+        ]
+
+        for item in per_sequence:
+            torch.save(
+                {
+                    "pred_state": item["pred_state"],
+                    "pose_p": item["pose_p"],
+                    "pose_t": item["pose_t"],
+                    "tran_p": item["tran_p"],
+                    "tran_t": item["tran_t"],
+                },
+                save_dir / f"{item['sample_order']}.pt",
+            )
+
+        with open(save_dir / "source_indices.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "dataset": self.dataset_name,
+                    "combo": self.combo,
+                    "epoch": epoch,
+                    "benchmark_indices": self.indices,
+                },
+                f,
+                indent=2,
+            )
+
+        with open(save_dir / "metrics_per_sequence.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["sample_order", "source_index", "num_frames", *metric_names])
+            for item in per_sequence:
+                writer.writerow(
+                    [
+                        item["sample_order"],
+                        item["source_index"],
+                        item["num_frames"],
+                        *[float(v) for v in item["error"][:, 0].tolist()],
+                    ]
+                )
+
+        summary_payload = {
+            name: {
+                "mean": float(summary[idx, 0].item()),
+                "std": float(summary[idx, 1].item()),
+            }
+            for idx, name in enumerate(metric_names)
+        }
+        with open(save_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary_payload, f, indent=2)
+
 
 def build_config(args):
     return DiffusionPoserConfig(
@@ -185,6 +282,11 @@ def build_config(args):
         dropout=args.dropout,
         beta_start=args.beta_start,
         beta_end=args.beta_end,
+        loss_simple_weight=args.loss_simple_weight,
+        loss_vel_weight=args.loss_vel_weight,
+        loss_fk_weight=args.loss_fk_weight,
+        loss_drift_weight=args.loss_drift_weight,
+        loss_slide_weight=args.loss_slide_weight,
     )
 
 
@@ -211,6 +313,7 @@ def build_callbacks(args, checkpoint_path):
                 every_n_epochs=args.benchmark_every_n_epochs,
                 seed=args.benchmark_seed,
                 window_length=args.window_length,
+                output_root=checkpoint_path.parent,
             )
         )
         if monitor_metric == "auto":
@@ -299,6 +402,11 @@ def main():
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--beta-start", type=float, default=1e-4)
     parser.add_argument("--beta-end", type=float, default=2e-2)
+    parser.add_argument("--loss-simple-weight", type=float, default=1.0)
+    parser.add_argument("--loss-vel-weight", type=float, default=1.0)
+    parser.add_argument("--loss-fk-weight", type=float, default=1.0)
+    parser.add_argument("--loss-drift-weight", type=float, default=1.0)
+    parser.add_argument("--loss-slide-weight", type=float, default=1.0)
 
     parser.add_argument("--benchmark-dataset", type=str, default="imuposer")
     parser.add_argument("--benchmark-combo", type=str, default="lw_rw_lp_rp_h")
@@ -317,6 +425,7 @@ def main():
     datamodule = DiffusionPoseDataModule(train_data_file_limit=args.train_data_file_limit)
     datamodule.hypers.batch_size = args.batch_size
     datamodule.hypers.num_workers = args.num_workers
+    datamodule.setup("fit")
 
     config = build_config(args)
     model = DiffusionPoser(config)
@@ -324,6 +433,16 @@ def main():
     model.hypers.batch_size = args.batch_size
 
     checkpoint_path = build_checkpoint_path(args)
+    stats = datamodule.get_normalization_stats()
+    model.set_normalization_stats(stats["mean"], stats["std"])
+    torch.save(
+        {
+            "mean": stats["mean"],
+            "std": stats["std"],
+            "count": stats["count"],
+        },
+        checkpoint_path.parent / "normalization_stats.pt",
+    )
     trainer, monitor_metric = build_trainer(args, checkpoint_path)
 
     print()
@@ -331,6 +450,7 @@ def main():
     print("Training Module: diffusionposer")
     print("Checkpoint Path:", checkpoint_path)
     print("Checkpoint Monitor:", monitor_metric)
+    print("Normalization Frames:", stats["count"])
     print("Config:", config)
     print("-" * 50)
     print()

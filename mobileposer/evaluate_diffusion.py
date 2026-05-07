@@ -68,7 +68,7 @@ def load_diffusion_model(checkpoint_path, args):
     model = DiffusionPoser(config)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint.get("state_dict", checkpoint)
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(state_dict, strict=False)
     return model
 
 
@@ -123,8 +123,16 @@ def evaluate_diffusion(model, dataset, combo, save_dir, num_steps=10, max_sample
         x0 = sample['x0'].to(device)
         pose_t = sample['pose'].to(device)
         tran_t = sample['tran'].to(device)
+        acc_obs = sample['acc'].to(device)
+        ori_obs = sample['ori'].to(device)
 
-        pred_state = inference.autoregressive(x0, combo=combo, num_steps=num_steps)
+        pred_state = inference.autoregressive(
+            x0,
+            combo=combo,
+            num_steps=num_steps,
+            acc_obs=acc_obs,
+            ori_obs=ori_obs,
+        )
         pose_p = inference.state_to_pose(pred_state)
         tran_p = inference.state_to_tran(pred_state)
         pose_errs.append(evaluator.eval(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t))

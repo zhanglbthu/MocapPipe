@@ -59,6 +59,17 @@ class DiffusionPoserInference:
             mask[self.layout.acc_sensor_slice(sensor_id)] = 1
         return mask
 
+    def observed_frame_from_imu(self, acc_frame, ori_frame, combo):
+        sensor_ids = self.combo_to_sensor_ids(combo)
+        frame = torch.zeros(self.layout.state_dim, device=acc_frame.device, dtype=acc_frame.dtype)
+        for sensor_id in sensor_ids:
+            joint_id = self.layout.imu_joint_ids[sensor_id]
+            frame[self.layout.acc_sensor_slice(sensor_id)] = acc_frame[sensor_id]
+            frame[self.layout.pose_joint_slice(joint_id)] = art.math.rotation_matrix_to_r6d(
+                ori_frame[sensor_id].unsqueeze(0)
+            ).reshape(-1)
+        return frame
+
     def inpaint(self, x_input, observed_mask, num_steps=None):
         """Fill unknown dimensions while clamping observed dimensions."""
         self.model.eval()
@@ -66,7 +77,7 @@ class DiffusionPoserInference:
         total_steps = self.model.config.diffusion_steps
         timesteps = torch.linspace(total_steps - 1, 0, steps, device=x_input.device).long()
 
-        x_input = x_input.unsqueeze(0)
+        x_input = self.model.normalize_state(x_input).unsqueeze(0)
         observed_mask = observed_mask.unsqueeze(0).bool()
         x_t = torch.randn_like(x_input)
         x_t = torch.where(observed_mask, self._known_noisy(x_input, timesteps[0]), x_t)
@@ -84,9 +95,9 @@ class DiffusionPoserInference:
             known = x_input if i == len(timesteps) - 1 else self._known_noisy(x_input, timesteps[min(i + 1, len(timesteps) - 1)])
             x_t = torch.where(observed_mask, known, x_t)
 
-        return x_t.squeeze(0)
+        return self.model.denormalize_state(x_t.squeeze(0))
 
-    def autoregressive(self, x0, combo, window_length=None, num_steps=None):
+    def autoregressive(self, x0, combo, window_length=None, num_steps=None, acc_obs=None, ori_obs=None):
         """Run sliding-window inpainting using ground-truth sparse IMU observations."""
         window_length = window_length or self.model.config.window_length
         current_mask = self.observed_frame_mask(combo).to(x0.device)
@@ -103,7 +114,11 @@ class DiffusionPoserInference:
                 x_input[start + i] = frame
                 mask[start + i] = 1
 
-            x_input[-1, current_mask.bool()] = x0[frame_idx, current_mask.bool()]
+            if acc_obs is not None and ori_obs is not None:
+                obs_frame = self.observed_frame_from_imu(acc_obs[frame_idx], ori_obs[frame_idx], combo)
+                x_input[-1, current_mask.bool()] = obs_frame[current_mask.bool()]
+            else:
+                x_input[-1, current_mask.bool()] = x0[frame_idx, current_mask.bool()]
             mask[-1] = current_mask
 
             window_pred = self.inpaint(x_input, mask, num_steps=num_steps)
