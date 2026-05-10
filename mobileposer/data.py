@@ -123,7 +123,6 @@ class DiffusionPoseDataset(Dataset):
     """
 
     pose_dim = 24 * 6
-    acc_dim = 7 * 3
     root_vel_dim = 3
     root_y_dim = 1
     contact_dim = 2
@@ -147,7 +146,6 @@ class DiffusionPoseDataset(Dataset):
     def state_dim(self):
         return (
             self.pose_dim
-            + self.acc_dim
             + self.root_vel_dim
             + self.root_y_dim
             + self.contact_dim
@@ -158,13 +156,8 @@ class DiffusionPoseDataset(Dataset):
         return slice(0, self.pose_dim)
 
     @property
-    def acc_slice(self):
-        start = self.pose_dim
-        return slice(start, start + self.acc_dim)
-
-    @property
     def root_vel_slice(self):
-        start = self.pose_dim + self.acc_dim
+        start = self.pose_dim
         return slice(start, start + self.root_vel_dim)
 
     @property
@@ -198,8 +191,6 @@ class DiffusionPoseDataset(Dataset):
                 'joint',
                 'tran',
                 'contact',
-                'acc',
-                'ori',
             ]
         }
 
@@ -228,7 +219,7 @@ class DiffusionPoseDataset(Dataset):
         rfoot_contact = torch.cat((torch.zeros(1), (dist_rfeet < 0.008).float()))
         return torch.stack((lfoot_contact, rfoot_contact), dim=1)
 
-    def _build_state(self, pose, acc, tran, contact):
+    def _build_state(self, pose, tran, contact):
         pose_6d = art.math.rotation_matrix_to_r6d(pose).reshape(pose.shape[0], -1)
         root_vel = torch.cat((torch.zeros(1, 3), tran[1:] - tran[:-1]))
         root_vel = root_vel * (datasets.fps / amass.vel_scale)
@@ -236,7 +227,6 @@ class DiffusionPoseDataset(Dataset):
         return torch.cat(
             [
                 pose_6d,
-                acc.flatten(1),
                 root_vel,
                 root_y,
                 contact,
@@ -254,7 +244,7 @@ class DiffusionPoseDataset(Dataset):
             acc, ori = self._pad_imus(acc, ori)
             pose, joint = self._get_global_pose_and_joint(pose)
             contact = self._get_contact(foot, joint)
-            x0 = self._build_state(pose, acc, tran, contact)
+            x0 = self._build_state(pose, tran, contact)
 
             data_len = len(x0) if self.evaluate else self.window_length
             x0_chunks = torch.split(x0, data_len)
@@ -262,25 +252,19 @@ class DiffusionPoseDataset(Dataset):
             joint_chunks = torch.split(joint, data_len)
             tran_chunks = torch.split(tran, data_len)
             contact_chunks = torch.split(contact, data_len)
-            acc_chunks = torch.split(acc, data_len)
-            ori_chunks = torch.split(ori, data_len)
 
-            for x_chunk, pose_chunk, joint_chunk, tran_chunk, contact_chunk, acc_chunk, ori_chunk in zip(
+            for x_chunk, pose_chunk, joint_chunk, tran_chunk, contact_chunk in zip(
                 x0_chunks,
                 pose_chunks,
                 joint_chunks,
                 tran_chunks,
                 contact_chunks,
-                acc_chunks,
-                ori_chunks,
             ):
                 data['x0'].append(x_chunk)
                 data['pose'].append(pose_chunk)
                 data['joint'].append(joint_chunk)
                 data['tran'].append(tran_chunk)
                 data['contact'].append(contact_chunk)
-                data['acc'].append(acc_chunk)
-                data['ori'].append(ori_chunk)
 
     def __getitem__(self, idx):
         return {
@@ -289,8 +273,6 @@ class DiffusionPoseDataset(Dataset):
             'joint': self.data['joint'][idx].float(),
             'tran': self.data['tran'][idx].float(),
             'contact': self.data['contact'][idx].float(),
-            'acc': self.data['acc'][idx].float(),
-            'ori': self.data['ori'][idx].float(),
         }
 
     def __len__(self):

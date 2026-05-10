@@ -12,7 +12,7 @@ from config import amass, datasets, paths, train_hypers
 
 @dataclass
 class DiffusionPoserConfig:
-    state_dim: int = 171
+    state_dim: int = 150
     window_length: int = 125
     diffusion_steps: int = 1000
     model_dim: int = 256
@@ -87,14 +87,12 @@ class DiffusionPoser(L.LightningModule):
     """DDPM training module with DiffusionPoser-style auxiliary losses."""
 
     pose_dim = 24 * 6
-    acc_dim = 7 * 3
     root_vel_dim = 3
     root_y_dim = 1
     contact_dim = 2
 
     pose_slice = slice(0, pose_dim)
-    acc_slice = slice(pose_dim, pose_dim + acc_dim)
-    root_vel_slice = slice(acc_slice.stop, acc_slice.stop + root_vel_dim)
+    root_vel_slice = slice(pose_dim, pose_dim + root_vel_dim)
     root_y_slice = slice(root_vel_slice.stop, root_vel_slice.stop + root_y_dim)
     contact_slice = slice(root_y_slice.stop, root_y_slice.stop + contact_dim)
 

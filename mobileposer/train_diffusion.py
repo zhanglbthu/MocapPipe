@@ -1,274 +1,147 @@
 import torch
 import lightning as L
-import random
-import numpy as np
 import json
-import csv
+import shutil
+import os
+import subprocess
+import sys
 from argparse import ArgumentParser
 from lightning.pytorch import seed_everything
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from pathlib import Path
-from tqdm import tqdm
 
 from config import paths, train_hypers
-from data import DiffusionPoseDataModule, DiffusionPoseDataset
+from data import DiffusionPoseDataModule
 from diffusionposer import DiffusionPoser, DiffusionPoserConfig, DiffusionPoserInference
-from evaluate import PoseEvaluator
 from utils.file_utils import get_datestring, get_dir_number
 
 
 torch.set_float32_matmul_precision('medium')
 
 
-BENCHMARK_METRIC_INDEX = {
-    "benchmark_sip_error_deg": 0,
-    "benchmark_angular_error_deg": 1,
-    "benchmark_masked_angular_error_deg": 2,
-    "benchmark_positional_error_cm": 3,
-    "benchmark_masked_positional_error_cm": 4,
-    "benchmark_mesh_error_cm": 5,
-    "benchmark_jitter_error_100m_s3": 6,
-    "benchmark_distance_error_cm": 7,
-}
-
-
-class DiffusionBenchmarkCallback(L.Callback):
+class UnconditionalSampleCallback(L.Callback):
     def __init__(
         self,
-        dataset_name,
-        combo,
-        num_steps,
-        indices,
         every_n_epochs,
+        num_steps,
+        num_samples,
         seed,
-        window_length,
         output_root,
+        render=False,
+        fps=30,
+        keep_intermediates=False,
     ):
         super().__init__()
-        self.dataset_name = dataset_name
-        self.combo = combo
-        self.num_steps = num_steps
-        self.indices = indices
         self.every_n_epochs = every_n_epochs
+        self.num_steps = num_steps
+        self.num_samples = num_samples
         self.seed = seed
-        self.window_length = window_length
         self.output_root = Path(output_root)
-        self.evaluator = PoseEvaluator()
-        self.dataset = None
-
-    def setup(self, trainer, pl_module, stage=None):
-        if self.dataset is None:
-            if not self.dataset_name:
-                raise ValueError("benchmark_dataset is required for benchmark setup.")
-            dataset = DiffusionPoseDataset(
-                fold="test",
-                evaluate=self.dataset_name,
-                window_length=self.window_length,
-            )
-            self.dataset = self._build_subset(dataset, self.indices)
+        self.render = render
+        self.fps = fps
+        self.keep_intermediates = keep_intermediates
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        if trainer.sanity_checking:
+        if trainer.sanity_checking or self.every_n_epochs <= 0:
             return
 
         epoch = trainer.current_epoch + 1
         if epoch % self.every_n_epochs != 0:
             return
 
-        if self.dataset is None:
-            self.setup(trainer, pl_module)
-
-        states = self._capture_rng_state()
-        self._set_seed(self.seed)
-
         was_training = pl_module.training
-        device = pl_module.device
-        inference = DiffusionPoserInference(pl_module, num_steps=self.num_steps)
-        errors = []
-        per_sequence = []
-
         try:
             pl_module.eval()
-            with torch.no_grad():
-                sample_count = len(self.dataset)
-                print(
-                    f"Running benchmark inference: dataset={self.dataset_name}, combo={self.combo}, "
-                    f"steps={self.num_steps}, indices={self.indices}"
+            save_dir = self.output_root / "prior_samples" / f"epoch_{epoch:03d}"
+            render_dir = self.output_root / "prior_samples_videos" / f"epoch_{epoch:03d}"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            summary = []
+            for sample_idx in range(1, self.num_samples + 1):
+                sample_seed = self.seed + sample_idx - 1
+                pred_state, pose, tran = self._unconditional_sample(
+                    model=pl_module,
+                    num_steps=self.num_steps,
+                    window_length=pl_module.config.window_length,
+                    seed=sample_seed,
                 )
-                for idx in tqdm(range(sample_count), desc="Benchmark inference", leave=False):
-                    sample = self.dataset[idx]
-                    x0 = sample["x0"].to(device)
-                    pose_t = sample["pose"].to(device)
-                    tran_t = sample["tran"].to(device)
-                    acc_obs = sample["acc"].to(device)
-                    ori_obs = sample["ori"].to(device)
-                    pred_state = inference.autoregressive(
-                        x0,
-                        combo=self.combo,
-                        num_steps=self.num_steps,
-                        acc_obs=acc_obs,
-                        ori_obs=ori_obs,
-                    )
-                    pose_p = inference.state_to_pose(pred_state)
-                    tran_p = inference.state_to_tran(pred_state)
-                    err = self.evaluator.eval(pose_p, pose_t, tran_p=tran_p, tran_t=tran_t)
-                    errors.append(err)
-                    per_sequence.append(
-                        {
-                            "sample_order": idx + 1,
-                            "source_index": self.indices[idx],
-                            "num_frames": int(pose_t.shape[0]),
-                            "error": err.cpu(),
-                            "pred_state": pred_state.cpu(),
-                            "pose_p": pose_p.cpu(),
-                            "pose_t": pose_t.cpu(),
-                            "tran_p": tran_p.cpu(),
-                            "tran_t": tran_t.cpu(),
-                        }
-                    )
+                torch.save(
+                    {
+                        "pred_state": pred_state.cpu(),
+                        "pose_p": pose.cpu(),
+                        "pose_t": pose.cpu(),
+                        "tran_p": tran.cpu(),
+                        "tran_t": tran.cpu(),
+                    },
+                    save_dir / f"{sample_idx}.pt",
+                )
+                summary.append(
+                    {
+                        "sample_id": sample_idx,
+                        "seed": sample_seed,
+                        **self._motion_stats(pose.cpu(), tran.cpu()),
+                    }
+                )
+
+            with open(save_dir / "summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+
+            print()
+            print("-" * 50)
+            print(
+                f"Saved unconditional prior samples: epoch={epoch}, "
+                f"num_samples={self.num_samples}, num_steps={self.num_steps}, dir={save_dir}"
+            )
+            print("-" * 50)
+            print()
+
+            if self.render:
+                self._render(save_dir, render_dir)
+
+            if not self.keep_intermediates:
+                shutil.rmtree(save_dir, ignore_errors=True)
         finally:
-            self._restore_rng_state(states)
             if was_training:
                 pl_module.train()
 
-        if not errors:
-            return
-
-        summary = torch.stack(errors).mean(dim=0)
-        angle = summary[1, 0]
-        mesh = summary[5, 0]
-        score = angle + mesh
-
-        metrics = {
-            "benchmark_score": score,
-            "benchmark_angular_error_deg": angle,
-            "benchmark_mesh_error_cm": mesh,
-        }
-
-        for name, metric_idx in BENCHMARK_METRIC_INDEX.items():
-            metrics[name] = summary[metric_idx, 0]
-
-        for name, value in metrics.items():
-            pl_module.log(name, value, prog_bar=(name == "benchmark_score"), logger=True, sync_dist=False)
-
-        print()
-        print("-" * 50)
-        print(
-            f"Benchmark Epoch {epoch}: dataset={self.dataset_name}, combo={self.combo}, "
-            f"steps={self.num_steps}, indices={self.indices}"
-        )
-        print(
-            f"benchmark_score={float(score):.4f} | "
-            f"angular={float(angle):.4f} | mesh={float(mesh):.4f}"
-        )
-        print("-" * 50)
-        print()
-
-        self._save_epoch_outputs(epoch, per_sequence, summary)
-
-    @staticmethod
-    def _build_subset(dataset, indices):
-        zero_based = []
-        for idx in indices:
-            if idx < 1 or idx > len(dataset):
-                raise IndexError(f"Benchmark index {idx} is out of range for dataset of size {len(dataset)}.")
-            zero_based.append(idx - 1)
-        return torch.utils.data.Subset(dataset, zero_based)
-
-    @staticmethod
-    def _set_seed(seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
+    def _unconditional_sample(self, model, num_steps, window_length, seed):
+        device = next(model.parameters()).device
+        if device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
+        torch.manual_seed(seed)
+
+        inference = DiffusionPoserInference(model, num_steps=num_steps)
+        x_input = torch.zeros(window_length, inference.layout.state_dim, device=device)
+        observed_mask = torch.zeros_like(x_input)
+        pred_state = inference.inpaint(x_input, observed_mask, num_steps=num_steps)
+        pose = inference.state_to_pose(pred_state)
+        tran = inference.state_to_tran(pred_state)
+        return pred_state, pose, tran
 
     @staticmethod
-    def _capture_rng_state():
+    def _motion_stats(pose, tran):
+        pose_delta = pose[1:] - pose[:-1] if pose.shape[0] > 1 else torch.zeros_like(pose[:0])
+        root_delta = tran[1:] - tran[:-1] if tran.shape[0] > 1 else torch.zeros_like(tran[:0])
         return {
-            "python": random.getstate(),
-            "numpy": np.random.get_state(),
-            "torch": torch.random.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "num_frames": int(pose.shape[0]),
+            "mean_pose_delta": float(pose_delta.abs().mean().item()) if pose_delta.numel() else 0.0,
+            "mean_root_speed": float(root_delta.norm(dim=1).mean().item()) if root_delta.numel() else 0.0,
+            "root_path_length": float(root_delta.norm(dim=1).sum().item()) if root_delta.numel() else 0.0,
         }
 
-    @staticmethod
-    def _restore_rng_state(states):
-        random.setstate(states["python"])
-        np.random.set_state(states["numpy"])
-        torch.random.set_rng_state(states["torch"])
-        if torch.cuda.is_available() and states["cuda"] is not None:
-            torch.cuda.set_rng_state_all(states["cuda"])
-
-    def _save_epoch_outputs(self, epoch, per_sequence, summary):
-        save_dir = (
-            self.output_root
-            / "benchmark_eval"
-            / self.dataset_name
-            / self.combo
-            / f"epoch_{epoch:03d}"
-        )
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        metric_names = [
-            "sip_error_deg",
-            "angular_error_deg",
-            "masked_angular_error_deg",
-            "positional_error_cm",
-            "masked_positional_error_cm",
-            "mesh_error_cm",
-            "jitter_error_100m_s3",
-            "distance_error_cm",
+    def _render(self, save_dir, render_dir):
+        env = os.environ.copy()
+        cmd = [
+            sys.executable,
+            str((paths.root_dir / "visualize.py").resolve()),
+            "--input-dir",
+            str(save_dir),
+            "--output-dir",
+            str(render_dir),
+            "--fps",
+            str(self.fps),
         ]
-
-        for item in per_sequence:
-            torch.save(
-                {
-                    "pred_state": item["pred_state"],
-                    "pose_p": item["pose_p"],
-                    "pose_t": item["pose_t"],
-                    "tran_p": item["tran_p"],
-                    "tran_t": item["tran_t"],
-                },
-                save_dir / f"{item['sample_order']}.pt",
-            )
-
-        with open(save_dir / "source_indices.json", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "dataset": self.dataset_name,
-                    "combo": self.combo,
-                    "epoch": epoch,
-                    "benchmark_indices": self.indices,
-                },
-                f,
-                indent=2,
-            )
-
-        with open(save_dir / "metrics_per_sequence.csv", "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["sample_order", "source_index", "num_frames", *metric_names])
-            for item in per_sequence:
-                writer.writerow(
-                    [
-                        item["sample_order"],
-                        item["source_index"],
-                        item["num_frames"],
-                        *[float(v) for v in item["error"][:, 0].tolist()],
-                    ]
-                )
-
-        summary_payload = {
-            name: {
-                "mean": float(summary[idx, 0].item()),
-                "std": float(summary[idx, 1].item()),
-            }
-            for idx, name in enumerate(metric_names)
-        }
-        with open(save_dir / "metrics_summary.json", "w", encoding="utf-8") as f:
-            json.dump(summary_payload, f, indent=2)
-
+        subprocess.run(cmd, check=True, cwd=paths.root_dir, env=env)
 
 def build_config(args):
     return DiffusionPoserConfig(
@@ -301,25 +174,21 @@ def build_checkpoint_path(args):
 
 def build_callbacks(args, checkpoint_path):
     callbacks = []
-    monitor_metric = args.monitor_metric
+    monitor_metric = "validation_step_loss" if args.monitor_metric == "auto" else args.monitor_metric
 
-    if args.benchmark_dataset:
+    if args.prior_sample_every_n_epochs > 0:
         callbacks.append(
-            DiffusionBenchmarkCallback(
-                dataset_name=args.benchmark_dataset,
-                combo=args.benchmark_combo,
-                num_steps=args.benchmark_num_steps,
-                indices=parse_benchmark_indices(args.benchmark_indices),
-                every_n_epochs=args.benchmark_every_n_epochs,
-                seed=args.benchmark_seed,
-                window_length=args.window_length,
+            UnconditionalSampleCallback(
+                every_n_epochs=args.prior_sample_every_n_epochs,
+                num_steps=args.prior_sample_num_steps,
+                num_samples=args.prior_sample_num_samples,
+                seed=args.prior_sample_seed,
                 output_root=checkpoint_path.parent,
+                render=args.prior_sample_render,
+                fps=args.prior_sample_fps,
+                keep_intermediates=args.prior_sample_keep_intermediates,
             )
         )
-        if monitor_metric == "auto":
-            monitor_metric = "benchmark_score"
-    elif monitor_metric == "auto":
-        monitor_metric = "validation_step_loss"
 
     checkpoint_callback = ModelCheckpoint(
         monitor=monitor_metric,
@@ -362,17 +231,6 @@ def build_trainer(args, checkpoint_path):
     return L.Trainer(**trainer_kwargs), monitor_metric
 
 
-def parse_benchmark_indices(value):
-    if value is None:
-        return [1, 2, 3]
-    if isinstance(value, list):
-        return [int(v) for v in value]
-    text = str(value).strip()
-    if not text:
-        return [1, 2, 3]
-    return [int(part.strip()) for part in text.split(",") if part.strip()]
-
-
 def main():
     parser = ArgumentParser()
     parser.add_argument("--fast-dev-run", action="store_true")
@@ -392,7 +250,7 @@ def main():
     parser.add_argument("--train-data-file-limit", type=int, default=None)
     parser.add_argument("--monitor-metric", type=str, default="auto")
 
-    parser.add_argument("--state-dim", type=int, default=171)
+    parser.add_argument("--state-dim", type=int, default=150)
     parser.add_argument("--window-length", type=int, default=125)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--model-dim", type=int, default=256)
@@ -407,13 +265,14 @@ def main():
     parser.add_argument("--loss-fk-weight", type=float, default=1.0)
     parser.add_argument("--loss-drift-weight", type=float, default=1.0)
     parser.add_argument("--loss-slide-weight", type=float, default=1.0)
+    parser.add_argument("--prior-sample-every-n-epochs", type=int, default=0)
+    parser.add_argument("--prior-sample-num-steps", type=int, default=30)
+    parser.add_argument("--prior-sample-num-samples", type=int, default=1)
+    parser.add_argument("--prior-sample-seed", type=int, default=1234)
+    parser.add_argument("--prior-sample-render", action="store_true")
+    parser.add_argument("--prior-sample-fps", type=int, default=30)
+    parser.add_argument("--prior-sample-keep-intermediates", action="store_true")
 
-    parser.add_argument("--benchmark-dataset", type=str, default="imuposer")
-    parser.add_argument("--benchmark-combo", type=str, default="lw_rw_lp_rp_h")
-    parser.add_argument("--benchmark-num-steps", type=int, default=30)
-    parser.add_argument("--benchmark-indices", type=str, default="1,2,3")
-    parser.add_argument("--benchmark-every-n-epochs", type=int, default=1)
-    parser.add_argument("--benchmark-seed", type=int, default=1234)
     args = parser.parse_args()
 
     seed_everything(args.seed, workers=True)

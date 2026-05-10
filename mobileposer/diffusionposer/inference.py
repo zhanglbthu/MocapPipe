@@ -6,17 +6,13 @@ from config import amass, datasets
 
 class StateLayout:
     pose_dim = 24 * 6
-    acc_dim = 7 * 3
     root_vel_dim = 3
     root_y_dim = 1
     contact_dim = 2
-    state_dim = pose_dim + acc_dim + root_vel_dim + root_y_dim + contact_dim
-
-    imu_joint_ids = [18, 19, 1, 2, 15, 7, 8]
+    state_dim = pose_dim + root_vel_dim + root_y_dim + contact_dim
 
     pose_slice = slice(0, pose_dim)
-    acc_slice = slice(pose_dim, pose_dim + acc_dim)
-    root_vel_slice = slice(acc_slice.stop, acc_slice.stop + root_vel_dim)
+    root_vel_slice = slice(pose_dim, pose_dim + root_vel_dim)
     root_y_slice = slice(root_vel_slice.stop, root_vel_slice.stop + root_y_dim)
     contact_slice = slice(root_y_slice.stop, root_y_slice.stop + contact_dim)
 
@@ -24,11 +20,6 @@ class StateLayout:
     def pose_joint_slice(cls, joint_id):
         start = joint_id * 6
         return slice(start, start + 6)
-
-    @classmethod
-    def acc_sensor_slice(cls, sensor_id):
-        start = cls.acc_slice.start + sensor_id * 3
-        return slice(start, start + 3)
 
 
 class DiffusionPoserInference:
@@ -42,33 +33,6 @@ class DiffusionPoserInference:
     @property
     def device(self):
         return next(self.model.parameters()).device
-
-    def combo_to_sensor_ids(self, combo):
-        if isinstance(combo, str):
-            if combo not in amass.combos_full:
-                raise ValueError(f"Unknown IMU combo: {combo}")
-            return amass.combos_full[combo]
-        return list(combo)
-
-    def observed_frame_mask(self, combo):
-        sensor_ids = self.combo_to_sensor_ids(combo)
-        mask = torch.zeros(self.layout.state_dim)
-        for sensor_id in sensor_ids:
-            joint_id = self.layout.imu_joint_ids[sensor_id]
-            mask[self.layout.pose_joint_slice(joint_id)] = 1
-            mask[self.layout.acc_sensor_slice(sensor_id)] = 1
-        return mask
-
-    def observed_frame_from_imu(self, acc_frame, ori_frame, combo):
-        sensor_ids = self.combo_to_sensor_ids(combo)
-        frame = torch.zeros(self.layout.state_dim, device=acc_frame.device, dtype=acc_frame.dtype)
-        for sensor_id in sensor_ids:
-            joint_id = self.layout.imu_joint_ids[sensor_id]
-            frame[self.layout.acc_sensor_slice(sensor_id)] = acc_frame[sensor_id]
-            frame[self.layout.pose_joint_slice(joint_id)] = art.math.rotation_matrix_to_r6d(
-                ori_frame[sensor_id].unsqueeze(0)
-            ).reshape(-1)
-        return frame
 
     def inpaint(self, x_input, observed_mask, num_steps=None):
         """Fill unknown dimensions while clamping observed dimensions."""
@@ -99,34 +63,7 @@ class DiffusionPoserInference:
 
     def autoregressive(self, x0, combo, window_length=None, num_steps=None, acc_obs=None, ori_obs=None):
         """Run sliding-window inpainting using ground-truth sparse IMU observations."""
-        window_length = window_length or self.model.config.window_length
-        current_mask = self.observed_frame_mask(combo).to(x0.device)
-
-        predictions = []
-        history = []
-        for frame_idx in range(x0.shape[0]):
-            x_input = torch.zeros(window_length, self.layout.state_dim, device=x0.device)
-            mask = torch.zeros_like(x_input)
-
-            recent = history[-(window_length - 1):]
-            start = window_length - 1 - len(recent)
-            for i, frame in enumerate(recent):
-                x_input[start + i] = frame
-                mask[start + i] = 1
-
-            if acc_obs is not None and ori_obs is not None:
-                obs_frame = self.observed_frame_from_imu(acc_obs[frame_idx], ori_obs[frame_idx], combo)
-                x_input[-1, current_mask.bool()] = obs_frame[current_mask.bool()]
-            else:
-                x_input[-1, current_mask.bool()] = x0[frame_idx, current_mask.bool()]
-            mask[-1] = current_mask
-
-            window_pred = self.inpaint(x_input, mask, num_steps=num_steps)
-            pred_frame = window_pred[-1]
-            predictions.append(pred_frame)
-            history.append(pred_frame.detach())
-
-        return torch.stack(predictions)
+        raise NotImplementedError("Autoregressive sparse-observation inference is disabled in the acc-free prior-only setup.")
 
     def state_to_pose(self, state):
         pose_6d = state[:, self.layout.pose_slice].contiguous().reshape(-1, 24, 6)

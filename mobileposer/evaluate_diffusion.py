@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--save-dir", type=str, default=None)
 
-    parser.add_argument("--state-dim", type=int, default=171)
+    parser.add_argument("--state-dim", type=int, default=150)
     parser.add_argument("--window-length", type=int, default=125)
     parser.add_argument("--diffusion-steps", type=int, default=1000)
     parser.add_argument("--model-dim", type=int, default=256)

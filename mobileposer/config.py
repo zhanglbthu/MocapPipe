@@ -65,12 +65,12 @@ class amass:
     """AMASS dataset information."""
     # device-location combinationsa
     combos_full = {
-        # # leaf device
-        'lw_rw_lp_rp_h_feet': [0, 1, 2, 3, 4, 5, 6],
-        'lw_rw_lp_rp_h': [0, 1, 2, 3, 4],
-        'lw_rw_lp_rp': [0, 1, 2, 3],
-        'lw_rw_h_feet': [0, 1, 4, 5, 6],
-        'lw_rw_feet': [0, 1, 5, 6],
+        # # # leaf device
+        # 'lw_rw_lp_rp_h_feet': [0, 1, 2, 3, 4, 5, 6],
+        # 'lw_rw_lp_rp_h': [0, 1, 2, 3, 4],
+        # 'lw_rw_lp_rp': [0, 1, 2, 3],
+        # 'lw_rw_h_feet': [0, 1, 4, 5, 6],
+        # 'lw_rw_feet': [0, 1, 5, 6],
         
         # five devices
         'lw_rp_h_feet': [0, 3, 4, 5, 6],
