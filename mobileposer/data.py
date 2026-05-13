@@ -16,13 +16,23 @@ from helpers import *
 
 
 class PoseDataset(Dataset):
-    def __init__(self, fold: str='train', evaluate: str=None, finetune: str=None):
+    def __init__(
+        self,
+        fold: str='train',
+        evaluate: str=None,
+        finetune: str=None,
+        use_global_pose: bool=True,
+        show_progress: bool=False,
+    ):
         super().__init__()
         self.fold = fold
         self.evaluate = evaluate
         self.finetune = finetune
+        self.use_global_pose = use_global_pose
+        self.show_progress = show_progress
         self.bodymodel = art.model.ParametricModel(paths.smpl_file)
         self.combos = list(amass.combos_full.items())
+        print(f"[PoseDataset] using combos: {[c[0] for c in self.combos]}")
         self.data = self._prepare_dataset()
 
     def _get_data_files(self, data_folder):
@@ -45,11 +55,19 @@ class PoseDataset(Dataset):
     def _prepare_dataset(self):
         data_folder = paths.processed_datasets / ('eval' if (self.finetune or self.evaluate) else '')
         data_files = self._get_data_files(data_folder)
+        print(f"[PoseDataset] preparing dataset from {len(data_files)} files in {data_folder}")
         data = {key: [] for key in ['imu_inputs', 'pose_outputs', 'joint_outputs', 'tran_outputs', 'vel_outputs', 'foot_outputs']}
         
-        for data_file in tqdm(data_files):
+        for file_idx, data_file in enumerate(tqdm(data_files), start=1):
+            if self.show_progress:
+                print(f"[PoseDataset] loading file {file_idx}/{len(data_files)}: {data_file}", flush=True)
             file_data = torch.load(data_folder / data_file)
             self._process_file_data(file_data, data)
+            if self.show_progress:
+                print(
+                    f"[PoseDataset] finished {data_file}; accumulated windows={len(data['imu_inputs'])}",
+                    flush=True,
+                )
         return data
 
     def _process_file_data(self, file_data, data):
@@ -65,9 +83,13 @@ class PoseDataset(Dataset):
                 ori = torch.cat([ori, torch.zeros(ori.shape[0], 7 - ori.shape[1], 3, 3)], dim=1)
             
             acc, ori = acc[:, :7]/amass.acc_scale, ori[:, :7] # change: select 7 IMUs
-            pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216)) # convert local rotation to global
-            pose = pose if self.evaluate else pose_global.view(-1, 24, 3, 3)                # use global only for training
-            joint = joint.view(-1, 24, 3)
+            if joint is None or self.use_global_pose:
+                pose_global, joint = self.bodymodel.forward_kinematics(pose=pose.view(-1, 216))
+                joint = joint.view(-1, 24, 3)
+                if not self.evaluate and self.use_global_pose:
+                    pose = pose_global.view(-1, 24, 3, 3)
+            elif joint is not None:
+                joint = joint.view(-1, 24, 3)
             self._process_combo_data(acc, ori, pose, joint, tran, foot, data)
 
     def _process_combo_data(self, acc, ori, pose, joint, tran, foot, data):
@@ -322,19 +344,31 @@ def pad_seq(batch):
 
 
 class PoseDataModule(L.LightningDataModule):
-    def __init__(self, finetune: str = None):
+    def __init__(self, finetune: str = None, use_global_pose: bool = True, show_progress: bool = False):
         super().__init__()
         self.finetune = finetune
+        self.use_global_pose = use_global_pose
+        self.show_progress = show_progress
         self.hypers = finetune_hypers if self.finetune else train_hypers
 
     def setup(self, stage: str):
         if stage == 'fit':
-            dataset = PoseDataset(fold='train', finetune=self.finetune)
+            dataset = PoseDataset(
+                fold='train',
+                finetune=self.finetune,
+                use_global_pose=self.use_global_pose,
+                show_progress=self.show_progress,
+            )
             train_size = int(0.9 * len(dataset))
             val_size = len(dataset) - train_size
             self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
         elif stage == 'test':
-            self.test_dataset = PoseDataset(fold='test', finetune=self.finetune)
+            self.test_dataset = PoseDataset(
+                fold='test',
+                finetune=self.finetune,
+                use_global_pose=self.use_global_pose,
+                show_progress=self.show_progress,
+            )
 
     def _dataloader(self, dataset):
         return DataLoader(

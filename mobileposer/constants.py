@@ -1,10 +1,11 @@
 import os
 
-from models import MobilePoserNet, Poser, Joints, FootContact, Velocity
+from models import MobilePoserNet, Poser, Joints, FootContact, Velocity, DirectPoserNet
 
 # List of available modules
 MODULES = {
     'poser': Poser,
+    'direct_poser': DirectPoserNet,
     'joints': Joints, 
     'foot_contact': FootContact,
     'velocity': Velocity
