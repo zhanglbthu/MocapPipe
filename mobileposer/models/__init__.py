@@ -6,3 +6,4 @@ from .poser import *
 from .joints import *
 from .directposer import *
 from .transformer import *
+from .imu_calibrator import *

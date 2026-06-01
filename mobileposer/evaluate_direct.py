@@ -32,7 +32,7 @@ def evaluate_pose(model, dataset, save_dir=None):
     for idx, (x, pose_t) in enumerate(zip(xs, ys)):
         print(f"Evaluating sample {idx + 1}/{len(xs)}...")
         model.reset()
-        pose_t = art.math.r6d_to_rotation_matrix(pose_t)
+        pose_t = art.math.r6d_to_rotation_matrix(pose_t).view(-1, 24, 3, 3)
 
         pose_p = []
         for i in tqdm(range(x.shape[0])):

@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pickle
 import torch
+import random
 from argparse import ArgumentParser
 from tqdm import tqdm
 import glob
@@ -18,6 +19,17 @@ TARGET_FPS = 30
 vi_mask = torch.tensor([1961, 5424, 876, 4362, 411, 3365, 6765])
 ji_mask = torch.tensor([18, 19, 1, 2, 15, 7, 8])
 body_model = ParametricModel(paths.smpl_file)
+
+
+HUAWEI_NEW_DEFAULT_DEVICE_ORDER = [
+    "Watch_left",
+    "Watch_right",
+    "Phone_left",
+    "Phone_right",
+    "Headset",
+    "STag_left",
+    "STag_right",
+]
 
 def _syn_acc(v, smooth_n=4):
     """Synthesize accelerations from vertex positions."""
@@ -394,6 +406,197 @@ def process_huawei(split: str="train"):
     data_path = paths.eval_dir / f"huawei_{split}.pt"
     torch.save(data, data_path)
 
+
+def _split_items(items, train_ratio: float = 0.8, seed: int = 1234):
+    rng = random.Random(seed)
+    shuffled = list(items)
+    rng.shuffle(shuffled)
+    train_count = max(1, min(len(shuffled) - 1, int(round(len(shuffled) * train_ratio))))
+    return {"train": shuffled[:train_count], "test": shuffled[train_count:]}
+
+
+def _pad_devices(tensor: torch.Tensor, target_devices: int, trailing_shape):
+    if tensor.shape[1] == target_devices:
+        return tensor
+    pad_shape = (tensor.shape[0], target_devices - tensor.shape[1], *trailing_shape)
+    return torch.cat([tensor, torch.zeros(*pad_shape, dtype=tensor.dtype)], dim=1)
+
+
+def _valid_device_mask(sample: dict, seq_len: int, num_devices: int, observed_device_count: int):
+    valid_mask = torch.zeros(seq_len, num_devices, dtype=torch.bool)
+    valid_mask[:, :observed_device_count] = True
+    if "synthetic_device_indices" in sample:
+        synthetic = [int(i) for i in sample["synthetic_device_indices"]]
+        valid_mask[:, synthetic] = False
+    return valid_mask
+
+
+def _collect_huawei_new_calibrator_items():
+    items = []
+    num_devices = len(HUAWEI_NEW_DEFAULT_DEVICE_ORDER)
+    for pid_path in sorted(paths.raw_huawei_new.iterdir()):
+        if not pid_path.is_dir():
+            continue
+        for fpath in sorted(pid_path.glob("*.pt"), key=lambda x: int(x.stem)):
+            print(f"Processing calibrator source: {fpath.parent.name}/{fpath.name}")
+            fdata = torch.load(fpath)
+
+            input_acc = fdata["aM"].float().view(-1, fdata["aM"].shape[1], 3)
+            input_ori = fdata["RMB"].float().view(-1, fdata["RMB"].shape[1], 3, 3)
+            pose = fdata["pose_gt"].float().view(-1, 24, 3, 3)
+            tran = fdata["tran_gt"].float().view(-1, 3)
+            tran[:, 0].neg_()
+            tran[:, 2].neg_()
+
+            seq_len = min(input_acc.shape[0], input_ori.shape[0], pose.shape[0], tran.shape[0])
+            input_acc = input_acc[:seq_len]
+            input_ori = input_ori[:seq_len]
+            pose = pose[:seq_len]
+            tran = tran[:seq_len]
+
+            grot, _, vert = body_model.forward_kinematics(pose=pose, tran=tran, calc_mesh=True)
+            target_acc = _syn_acc(vert[:, vi_mask]).float()
+            target_ori = grot[:, ji_mask].float()
+
+            input_acc = _pad_devices(input_acc, num_devices, (3,))
+            input_ori = _pad_devices(input_ori, num_devices, (3, 3))
+            valid_mask = _valid_device_mask(fdata, seq_len, num_devices, fdata["aM"].shape[1])
+
+            items.append(
+                {
+                    "input_acc": input_acc,
+                    "input_ori": input_ori,
+                    "target_acc": target_acc,
+                    "target_ori": target_ori,
+                    "valid_mask": valid_mask,
+                    "pose": pose,
+                    "tran": tran,
+                    "device_names": fdata.get("device_order", HUAWEI_NEW_DEFAULT_DEVICE_ORDER),
+                    "source_file": f"{fpath.parent.name}/{fpath.name}",
+                    "source_domain": "huawei_new",
+                    "source_subject": fpath.parent.name,
+                }
+            )
+    return items
+
+
+def _collect_imuposer_calibrator_items(split: str = "train"):
+    items = []
+    num_devices = len(HUAWEI_NEW_DEFAULT_DEVICE_ORDER)
+    dataset_name = datasets.imuposer_train if split == "train" else datasets.imuposer_test
+    fdata = torch.load(paths.eval_dir / dataset_name)
+    for seq_idx, (input_acc, input_ori, pose, tran) in enumerate(
+        zip(fdata["acc"], fdata["ori"], fdata["pose"], fdata["tran"]),
+        start=1,
+    ):
+        print(f"Processing calibrator source: imuposer_{split}/{seq_idx}")
+        input_acc = input_acc.float().view(-1, input_acc.shape[1], 3)
+        input_ori = input_ori.float().view(-1, input_ori.shape[1], 3, 3)
+        pose = pose.float().view(-1, 24, 3, 3)
+        tran = tran.float().view(-1, 3)
+
+        seq_len = min(input_acc.shape[0], input_ori.shape[0], pose.shape[0], tran.shape[0])
+        input_acc = input_acc[:seq_len]
+        input_ori = input_ori[:seq_len]
+        pose = pose[:seq_len]
+        tran = tran[:seq_len]
+
+        grot, _, vert = body_model.forward_kinematics(pose=pose, tran=tran, calc_mesh=True)
+        target_acc = _syn_acc(vert[:, vi_mask]).float()
+        target_ori = grot[:, ji_mask].float()
+
+        observed_count = input_acc.shape[1]
+        input_acc = _pad_devices(input_acc, num_devices, (3,))
+        input_ori = _pad_devices(input_ori, num_devices, (3, 3))
+        valid_mask = torch.zeros(seq_len, num_devices, dtype=torch.bool)
+        valid_mask[:, :observed_count] = True
+
+        items.append(
+            {
+                "input_acc": input_acc,
+                "input_ori": input_ori,
+                "target_acc": target_acc,
+                "target_ori": target_ori,
+                "valid_mask": valid_mask,
+                "pose": pose,
+                "tran": tran,
+                "device_names": HUAWEI_NEW_DEFAULT_DEVICE_ORDER,
+                "source_file": f"imuposer_{split}/{seq_idx}",
+                "source_domain": f"imuposer_{split}",
+                "source_subject": f"imuposer_{split}",
+            }
+        )
+    return items
+
+
+def process_huawei_new_calibrator(split: str = "train", train_ratio: float = 0.8, seed: int = 1234):
+    """Prepare paired real-to-synthetic IMU calibration data.
+
+    Train split: all Huawei_new + all IMUPoser train.
+    Test split: all IMUPoser test.
+    """
+    if split == "train":
+        selected_items = _collect_huawei_new_calibrator_items() + _collect_imuposer_calibrator_items(split="train")
+        split_meta = {
+            "train_sources": ["huawei_new", "imuposer_train"],
+            "test_sources": ["imuposer_test"],
+            "seed": None,
+            "train_ratio": None,
+        }
+    elif split == "test":
+        selected_items = _collect_imuposer_calibrator_items(split="test")
+        split_meta = {
+            "train_sources": ["huawei_new", "imuposer_train"],
+            "test_sources": ["imuposer_test"],
+            "seed": None,
+            "train_ratio": None,
+        }
+    else:
+        raise ValueError(f"Unsupported split: {split}")
+
+    input_accs, input_oris = [], []
+    target_accs, target_oris, valid_masks = [], [], []
+    poses, trans, device_names, source_files, source_domains, source_subjects = [], [], [], [], [], []
+
+    for item in selected_items:
+        input_accs.append(item["input_acc"])
+        input_oris.append(item["input_ori"])
+        target_accs.append(item["target_acc"])
+        target_oris.append(item["target_ori"])
+        valid_masks.append(item["valid_mask"])
+        poses.append(item["pose"])
+        trans.append(item["tran"])
+        device_names.append(item["device_names"])
+        source_files.append(item["source_file"])
+        source_domains.append(item["source_domain"])
+        source_subjects.append(item["source_subject"])
+
+    print(f"# Calibrator sequences processed: {len(input_accs)}")
+    data = {
+        "input_acc": input_accs,
+        "input_ori": input_oris,
+        "target_acc": target_accs,
+        "target_ori": target_oris,
+        "valid_mask": valid_masks,
+        "pose": poses,
+        "tran": trans,
+        "device_names": device_names,
+        "source_files": source_files,
+        "source_domains": source_domains,
+        "source_subjects": source_subjects,
+        "split_meta": {
+            **split_meta,
+            "num_sequences": len(selected_items),
+            "num_huawei_sequences": sum(1 for x in source_domains if x == "huawei_new"),
+            "num_imuposer_train_sequences": sum(1 for x in source_domains if x == "imuposer_train"),
+            "num_imuposer_test_sequences": sum(1 for x in source_domains if x == "imuposer_test"),
+            "unique_subjects": sorted(set(source_subjects)),
+        },
+    }
+    data_path = paths.eval_dir / f"huawei_new_calibrator_{split}.pt"
+    torch.save(data, data_path)
+    print(f"Huawei_new calibrator dataset saved at: {data_path}")
+
 def create_directories():
     paths.processed_datasets.mkdir(exist_ok=True, parents=True)
     paths.eval_dir.mkdir(exist_ok=True, parents=True)
@@ -401,6 +604,8 @@ def create_directories():
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="amass")
+    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--split-seed", type=int, default=1234)
     args = parser.parse_args()
 
     # create dataset directories
@@ -420,5 +625,8 @@ if __name__ == "__main__":
     elif args.dataset == "huawei":
         process_huawei(split="train")
         process_huawei(split="test")
+    elif args.dataset == "huawei_new_calibrator":
+        process_huawei_new_calibrator(split="train", train_ratio=args.train_ratio, seed=args.split_seed)
+        process_huawei_new_calibrator(split="test", train_ratio=args.train_ratio, seed=args.split_seed)
     else:
         raise ValueError(f"Dataset {args.dataset} not supported.")

@@ -13,22 +13,38 @@ from models.directposer import DirectPoserNet
 def main():
     parser = ArgumentParser()
     parser.add_argument("--save-dir", type=str, default="data/checkpoints/directposer_amass")
+    parser.add_argument("--finetune-dataset", type=str, default=None)
     parser.add_argument("--backbone", type=str, default="lstm", choices=["lstm", "transformer"])
     parser.add_argument("--transformer-d-model", type=int, default=192)
     parser.add_argument("--transformer-nhead", type=int, default=8)
     parser.add_argument("--transformer-num-layers", type=int, default=6)
     parser.add_argument("--transformer-dim-feedforward", type=int, default=768)
     parser.add_argument("--transformer-dropout", type=float, default=0.4)
+    parser.add_argument("--batch-size", type=int, default=train_hypers.batch_size)
+    parser.add_argument("--num-workers", type=int, default=train_hypers.num_workers)
+    parser.add_argument("--num-epochs", type=int, default=train_hypers.num_epochs)
+    parser.add_argument("--accelerator", type=str, default=train_hypers.accelerator)
+    parser.add_argument("--device", type=int, default=train_hypers.device)
     parser.add_argument("--fast-dev-run", action="store_true")
     args = parser.parse_args()
 
     seed_everything(42, workers=True)
 
+    train_hypers.batch_size = args.batch_size
+    train_hypers.num_workers = args.num_workers
+    train_hypers.num_epochs = args.num_epochs
+    train_hypers.accelerator = args.accelerator
+    train_hypers.device = args.device
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     print("begin training")
-    datamodule = PoseDataModule(finetune=None, use_global_pose=True, show_progress=True)
+    datamodule = PoseDataModule(
+        finetune=args.finetune_dataset,
+        use_global_pose=True,
+        show_progress=True,
+    )
     model = DirectPoserNet(
         backbone=args.backbone,
         transformer_d_model=args.transformer_d_model,

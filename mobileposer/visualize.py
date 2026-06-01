@@ -37,8 +37,8 @@ def to_local_pose(body_model, pose):
 
 
 @torch.no_grad()
-def pose_to_vertices(body_model, pose, tran, batch_size=256):
-    pose = to_local_pose(body_model, pose)
+def pose_to_vertices(body_model, pose, tran, batch_size=256, pose_is_local=False, global_scale=1.0):
+    pose = pose.float().view(-1, 24, 3, 3) if pose_is_local else to_local_pose(body_model, pose)
     tran = tran.float().view(-1, 3)
     vertices = []
 
@@ -51,7 +51,7 @@ def pose_to_vertices(body_model, pose, tran, batch_size=256):
         )
         vertices.append(vert.cpu())
 
-    return torch.cat(vertices, dim=0).numpy()
+    return (torch.cat(vertices, dim=0) * float(global_scale)).numpy()
 
 
 def resolve_output_dir(input_dir, output_dir):
@@ -175,8 +175,22 @@ def visualize_sequence(seq_path, output_path, body_model, args):
     gt_tran = maybe_zero_translation(data["pose_t"], data.get("tran_t"), args.visualize_tran)
     pred_tran = maybe_zero_translation(data["pose_p"], data.get("tran_p"), args.visualize_tran)
 
-    gt_vertices = pose_to_vertices(body_model, data["pose_t"], gt_tran, args.batch_size)
-    pred_vertices = pose_to_vertices(body_model, data["pose_p"], pred_tran, args.batch_size)
+    gt_vertices = pose_to_vertices(
+        body_model,
+        data["pose_t"],
+        gt_tran,
+        args.batch_size,
+        pose_is_local=args.pose_is_local,
+        global_scale=args.global_scale,
+    )
+    pred_vertices = pose_to_vertices(
+        body_model,
+        data["pose_p"],
+        pred_tran,
+        args.batch_size,
+        pose_is_local=args.pose_is_local,
+        global_scale=args.global_scale,
+    )
 
     n_frames = min(len(gt_vertices), len(pred_vertices))
     frame_ids = list(range(0, n_frames, args.stride))
@@ -211,6 +225,8 @@ def main():
     parser.add_argument("--face-stride", type=int, default=1, help="Use every Nth SMPL face.")
     parser.add_argument("--subject-spacing", type=float, default=1.1, help="Horizontal spacing between GT and Pred meshes.")
     parser.add_argument("--visualize-tran", action="store_true", help="Include translation in the visualization.")
+    parser.add_argument("--pose-is-local", action="store_true", help="Treat pose_t/pose_p as local SMPL rotations and skip inverse kinematics.")
+    parser.add_argument("--global-scale", type=float, default=1.0, help="Scale rendered meshes and translations by a constant factor.")
     parser.add_argument("--batch-size", type=int, default=256, help="SMPL FK batch size.")
     args = parser.parse_args()
 
@@ -250,6 +266,10 @@ def main():
             base_cmd.extend(["--max-frames", str(args.max_frames)])
         if args.visualize_tran:
             base_cmd.append("--visualize-tran")
+        if args.pose_is_local:
+            base_cmd.append("--pose-is-local")
+        if args.global_scale != 1.0:
+            base_cmd.extend(["--global-scale", str(args.global_scale)])
 
         for seq_path in seq_files:
             seq_cmd = base_cmd + ["--sequence", seq_path.stem]

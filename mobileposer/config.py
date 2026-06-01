@@ -38,6 +38,7 @@ class paths:
     # raw_dip = Path("/data/projects/Pose/raw/DIP_IMU")           # TODO: replace with your path
     raw_imuposer = Path("/root/autodl-tmp/dataset/raw/IMUPoser")     # TODO: replace with your path\
     raw_huawei = Path("/root/autodl-tmp/dataset/raw/Huawei")     
+    raw_huawei_new = Path("/root/autodl-tmp/dataset/raw/Huawei_new")
     eval_dir = Path("/root/autodl-tmp/dataset/processed/eval")
     # processed_datasets = root_dir / "data/processed_datasets"
     processed_datasets = Path("/root/autodl-tmp/dataset/processed")  
@@ -77,7 +78,7 @@ class amass:
         # 'rw_rp_h_feet': [1, 3, 4, 5, 6],
         # 'lw_lp_h_feet': [0, 2, 4, 5, 6],
         # 'rw_lp_h_feet': [1, 2, 4, 5, 6],
-        # three devices
+        # # three devices
         'lw_rp_h': [0, 3, 4],
         # 'rw_rp_h': [1, 3, 4],
         # 'lw_lp_h': [0, 2, 4],
@@ -87,6 +88,8 @@ class amass:
         # 'rw_rp': [1, 3],
         # 'lw_lp': [0, 2],
         # 'rw_lp': [1, 2],
+        # # one device
+        # 'lw': [0],
      }
     
     acc_scale = 30
@@ -117,24 +120,30 @@ class datasets:
     imuposer = "imuposer.pt"
     imuposer_train = "imuposer_train.pt"
     imuposer_test = "imuposer_test.pt"
+    imuposer_toy_multimodal_train = "imuposer_toy_multimodal_train.pt"
+    imuposer_toy_multimodal_test = "imuposer_toy_multimodal_test.pt"
     
     # Huawei dataset
     huawei_train = "huawei_train.pt"
     huawei_test = "huawei_test.pt"
+    huawei_new_calibrator_train = "huawei_new_calibrator_train.pt"
+    huawei_new_calibrator_test = "huawei_new_calibrator_test.pt"
 
     # Test datasets
     test_datasets = {
         'dip': dip_test,
         'totalcapture': totalcapture,
         'imuposer': imuposer_test,
-        'huawei': huawei_test
+        'huawei': huawei_test,
+        'imuposer_toy_multimodal': imuposer_toy_multimodal_test,
     }
 
     # Finetune datasets
     finetune_datasets = {
         'dip': dip_train,
         'imuposer': imuposer_train,
-        'huawei': huawei_train
+        'huawei': huawei_train,
+        'imuposer_toy_multimodal': imuposer_toy_multimodal_train,
     }
 
     # AMASS datasets (add more as they become available in AMASS!)
@@ -184,3 +193,16 @@ class Devices(Enum):
     Right_Headphone = auto()
     Right_Phone = auto()
     Right_Watch = auto()
+
+class HuaweiDevices:
+    device_ids = {
+        "Left_Watch": 0,
+        "Right_Watch": 1,
+        "Left_Phone": 2,
+        "Right_Phone": 3,
+        "Head": 4,
+        # "Left_STag": 5,
+        # "Right_STag": 6,
+    }
+    time_offsets = [0, 0, 0, 0, 0, 0, 0]
+    BUFFER_SIZE = 50

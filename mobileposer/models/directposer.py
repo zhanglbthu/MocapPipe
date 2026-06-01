@@ -157,5 +157,14 @@ class DirectPoserNet(L.LightningModule):
         self.imu = imu
         return pose
 
+    def forward_frame_train(self, data):
+        imu = data.repeat(self.num_total_frames, 1) if self.imu is None else torch.cat((self.imu[1:], data.view(1, -1)))
+        reduced_pose = self(imu.unsqueeze(0), [self.num_total_frames])
+        pose = self._reduced_global_to_full(
+            reduced_pose[:, self.num_past_frames:self.num_past_frames + 1]
+        ).squeeze(0).squeeze(0)
+        self.imu = imu
+        return pose
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hypers.lr)
