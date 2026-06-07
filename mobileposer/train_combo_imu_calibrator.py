@@ -146,7 +146,7 @@ def evaluate(model, loader, mocap_model, combo, device, imu_loss_weight, pose_lo
             seq_mask = batch["seq_mask"].to(device)
             valid_mask = batch["valid_mask"].to(device) & seq_mask.unsqueeze(-1)
 
-            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, return_ori6d=True)
+            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, causal=False, return_ori6d=True)
             ori_loss = masked_mse(pred_ori, target_ori, valid_mask)
             jerk_loss = compute_jerk_loss(pred_ori6d, seq_mask)
             pose_loss = pred_ori6d.new_tensor(0.0)
@@ -257,7 +257,7 @@ def main():
             seq_mask = batch["seq_mask"].to(device)
             valid_mask = batch["valid_mask"].to(device) & seq_mask.unsqueeze(-1)
 
-            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, return_ori6d=True)
+            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, causal=False, return_ori6d=True)
             ori_loss = masked_mse(pred_ori, target_ori, valid_mask)
             jerk_loss = compute_jerk_loss(pred_ori6d, seq_mask)
             pose_loss = pred_ori6d.new_tensor(0.0)

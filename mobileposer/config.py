@@ -51,8 +51,8 @@ class model_config:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # joint set
-    n_joints = 5                        # (head, right-wrist, left-wrist, right-hip, left-hip)
-    n_imu = 12*n_joints                 # 60 (3 accel. axes + 3x3 orientation rotation matrix) * 5 possible IMU locations
+    n_joints = 7                        # active IMU locations used by the base 12-combo model
+    n_imu = 12*n_joints                 # 84 (3 accel. axes + 3x3 orientation rotation matrix) * 7 IMU locations
     n_output_joints = 24                # 24 output joints
     n_pose_output = n_output_joints*6   # 144 pose output (24 output joints * 6D rotation matrix)
 
