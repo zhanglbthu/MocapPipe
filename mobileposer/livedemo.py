@@ -62,6 +62,7 @@ def load_tic_calibrator(path: str, device: torch.device, buffer_size: int, trigg
             buffer_size=buffer_size,
             trigger_t=trigger_t,
             data_frame_rate=30,
+            update_every_frame_when_ready=True,
             ego_idx=len(CALIBRATOR_COMBO) - 1,
         ),
     )

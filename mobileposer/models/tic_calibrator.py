@@ -213,6 +213,7 @@ class TICOperatorConfig:
     buffer_size: int = 512
     trigger_t: float = 1.0
     data_frame_rate: int = 30
+    update_every_frame_when_ready: bool = False
     drift_threshold: Optional[list] = None
     offset_threshold: Optional[list] = None
     ego_idx: int = -1
@@ -229,9 +230,11 @@ class TICOnlineCalibrator:
         self.config = config
         self.device = next(model.parameters()).device
         if config.drift_threshold is None:
-            config.drift_threshold = [10.0] * max(imu_num - 1, 0) + [0.0]
+            # Effectively disable diversity gating by making the thresholds
+            # far below any attainable rotation-diversity count.
+            config.drift_threshold = [-1e9] * imu_num
         if config.offset_threshold is None:
-            config.offset_threshold = [30.0] * imu_num
+            config.offset_threshold = [-1e9] * imu_num
         self.reset()
 
     def reset(self):
@@ -297,7 +300,12 @@ class TICOnlineCalibrator:
         self.data_buffer.append(recali.clone())
 
         trigger_gap = int(self.config.data_frame_rate * self.config.trigger_t)
-        if self.frame_idx % trigger_gap == 0:
+        should_update = False
+        if self.config.update_every_frame_when_ready:
+            should_update = len(self.data_buffer) >= self.config.buffer_size
+        else:
+            should_update = self.frame_idx % trigger_gap == 0
+        if should_update:
             self.dynamic_calibration()
         if len(self.data_buffer) > self.config.buffer_size:
             self.data_buffer = self.data_buffer[-self.config.buffer_size :]
