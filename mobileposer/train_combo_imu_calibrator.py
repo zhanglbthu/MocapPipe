@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from config import datasets, model_config, paths
 from evaluate_direct import load_direct_model
-from models.imu_calibrator import ComboTemporalIMUCalibrator, build_imu_input
+from models.imu_calibrator import ComboTemporalIMUCalibrator, TICComboCalibrator, build_imu_input
 
 
 COMBO_MAP = {
@@ -185,6 +185,7 @@ def main():
     parser.add_argument("--window-size", type=int, default=125)
     parser.add_argument("--stride", type=int, default=60)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--model-type", type=str, default="combo", choices=["combo", "tic"])
     parser.add_argument("--imu-loss-weight", type=float, default=1.0)
     parser.add_argument("--pose-loss-weight", type=float, default=0.0)
     parser.add_argument("--jerk-loss-weight", type=float, default=5e-4)
@@ -210,7 +211,8 @@ def main():
 
     device = torch.device(args.device)
     combo = COMBO_MAP[args.combo]
-    model = ComboTemporalIMUCalibrator(
+    model_cls = ComboTemporalIMUCalibrator if args.model_type == "combo" else TICComboCalibrator
+    model = model_cls(
         combo_size=len(COMBO_MAP[args.combo]),
         predict_acc=False,
         hidden_dim=args.hidden_dim,
@@ -324,7 +326,7 @@ def main():
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "args": checkpoint_args,
-            "model_type": "combo_temporal_transformer",
+            "model_type": "combo_temporal_transformer" if args.model_type == "combo" else "tic_combo_transformer",
             "epoch": epoch,
             "history": history,
         }

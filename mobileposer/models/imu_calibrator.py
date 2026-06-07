@@ -279,3 +279,142 @@ class ComboTemporalIMUCalibrator(nn.Module):
         output_idx = self.online_past_frames - 1
         pred_acc_frame = None if pred_acc is None else pred_acc[0, output_idx]
         return pred_acc_frame, pred_ori[0, output_idx]
+
+
+class TICComboCalibrator(nn.Module):
+    """
+    TIC-style transformer baseline adapted to the current combo-calibration task.
+
+    Unlike the original TIC repo, this model keeps our existing framewise
+    real->synthetic supervision and online windowed inference, but swaps in a
+    lighter transformer backbone with a TIC-like pooled context branch.
+    """
+
+    def __init__(
+        self,
+        combo_size: int = 3,
+        input_dim_per_device: int = 12,
+        predict_acc: bool = False,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
+        num_layers: int = 4,
+        nhead: int = 8,
+        max_seq_len: int = 256,
+        online_past_frames: int = 45,
+        online_future_frames: int = 5,
+    ):
+        super().__init__()
+        self.combo_size = combo_size
+        self.input_dim_per_device = input_dim_per_device
+        self.input_dim = combo_size * input_dim_per_device
+        self.predict_acc = predict_acc
+        self.hidden_dim = hidden_dim
+        self.max_seq_len = max_seq_len
+        self.online_past_frames = online_past_frames
+        self.online_future_frames = online_future_frames
+
+        self.input_proj = nn.Linear(self.input_dim, hidden_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len, hidden_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim * 2,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.context_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.acc_head = nn.Linear(hidden_dim, combo_size * 3) if predict_acc else None
+        self.ori_head = nn.Linear(hidden_dim, combo_size * 6)
+        self.buffer = None
+
+    def reset(self):
+        self.buffer = None
+
+    def _causal_mask(self, seq_len: int, device: torch.device):
+        mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
+        return torch.triu(mask, diagonal=1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        seq_mask: Optional[torch.Tensor] = None,
+        causal: bool = False,
+        return_ori6d: bool = False,
+    ):
+        if x.dim() == 4:
+            batch_size, seq_len, combo_size, feat_dim = x.shape
+            if combo_size != self.combo_size or feat_dim != self.input_dim_per_device:
+                raise ValueError(f"Expected [B,T,{self.combo_size},{self.input_dim_per_device}], got {tuple(x.shape)}")
+            flat_x = x.reshape(batch_size, seq_len, -1)
+        elif x.dim() == 3:
+            batch_size, seq_len, flat_dim = x.shape
+            if flat_dim != self.input_dim:
+                raise ValueError(f"Expected last dim {self.input_dim}, got {flat_dim}")
+            flat_x = x
+        else:
+            raise ValueError(f"Unsupported input shape {tuple(x.shape)}")
+
+        if seq_len > self.max_seq_len:
+            raise ValueError(f"seq_len={seq_len} exceeds max_seq_len={self.max_seq_len}")
+
+        feat = self.input_proj(flat_x)
+        feat = feat + self.pos_embed[:, :seq_len]
+
+        padding_mask = None if seq_mask is None else ~seq_mask
+        encoder_kwargs = {"src_key_padding_mask": padding_mask}
+        if causal:
+            encoder_kwargs["mask"] = self._causal_mask(seq_len, feat.device)
+        feat = self.encoder(feat, **encoder_kwargs)
+        feat = self.norm(feat)
+
+        if seq_mask is None:
+            pooled = feat.mean(dim=1)
+        else:
+            denom = seq_mask.sum(dim=1, keepdim=True).clamp_min(1)
+            pooled = (feat * seq_mask.unsqueeze(-1)).sum(dim=1) / denom
+        context = self.context_mlp(pooled).unsqueeze(1)
+        fused = feat + context
+
+        pred_acc = None
+        if self.acc_head is not None:
+            pred_acc = self.acc_head(fused).view(batch_size, seq_len, self.combo_size, 3)
+        pred_ori6d = self.ori_head(fused).view(batch_size, seq_len, self.combo_size, 6)
+        pred_ori = art.math.r6d_to_rotation_matrix(pred_ori6d.reshape(-1, 6)).view(
+            batch_size, seq_len, self.combo_size, 3, 3
+        )
+        if return_ori6d:
+            return pred_acc, pred_ori, pred_ori6d
+        return pred_acc, pred_ori
+
+    @torch.no_grad()
+    def forward_frame_windowed(self, frame: torch.Tensor):
+        if frame.dim() == 2:
+            frame = frame.reshape(-1)
+        elif frame.dim() != 1:
+            raise ValueError(f"Expected frame shape [combo_size, 12] or [combo_size*12], got {tuple(frame.shape)}")
+        if frame.shape[0] != self.input_dim:
+            raise ValueError(f"Expected flattened frame dim {self.input_dim}, got {frame.shape[0]}")
+
+        if self.buffer is None:
+            recent = frame.unsqueeze(0).repeat(self.online_past_frames, 1)
+        else:
+            recent = torch.cat([self.buffer[1:], frame.unsqueeze(0)], dim=0)
+
+        future = frame.unsqueeze(0).repeat(self.online_future_frames, 1)
+        window = torch.cat([recent, future], dim=0)
+        seq = window.unsqueeze(0)
+        seq_mask = torch.ones(1, seq.shape[1], dtype=torch.bool, device=seq.device)
+        pred_acc, pred_ori = self(seq, seq_mask=seq_mask, causal=False)
+        self.buffer = recent
+
+        output_idx = self.online_past_frames - 1
+        pred_acc_frame = None if pred_acc is None else pred_acc[0, output_idx]
+        return pred_acc_frame, pred_ori[0, output_idx]
