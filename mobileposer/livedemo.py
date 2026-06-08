@@ -17,6 +17,7 @@ import traceback
 import datetime
 from models.imu_calibrator import ComboTemporalIMUCalibrator, build_imu_input
 from models.tic_calibrator import TICOnlineCalibrator, TICOperatorConfig, TICTransformerCalibrator
+from models.genmo_live import GenMoLiveWrapper, load_genmo_model
 
 colors = matplotlib.colormaps['tab10'].colors
 body_model = art.ParametricModel(paths.smpl_file, device='cuda')
@@ -114,6 +115,25 @@ if __name__ == '__main__':
     parser.add_argument('--sub', type=str, default='chaoran_0529')
     parser.add_argument('--mocap', action='store_true', help='use mocap')
     parser.add_argument(
+        '--mocap-backend',
+        type=str,
+        choices=['mobileposer', 'genmo'],
+        default='mobileposer',
+        help='which mocap backend to use',
+    )
+    parser.add_argument(
+        '--genmo-ckpt',
+        type=str,
+        default='3rd_party/genmo/outputs/gem_imu_lw_rp_h_causal/version_0/checkpoints/last.ckpt',
+        help='GENMO causal IMU checkpoint',
+    )
+    parser.add_argument(
+        '--genmo-exp',
+        type=str,
+        default='gem_imu_lw_rp_h_causal',
+        help='GENMO hydra exp name',
+    )
+    parser.add_argument(
         '--ours-calibrator',
         type=str,
         default='data/checkpoints/combo_imu_calibrator_lw_rp_h_ori_only_jerk_nopose_fulltrain_tb_noncausal/best.pt',
@@ -155,9 +175,15 @@ if __name__ == '__main__':
     clock = Clock()
 
     if args.mocap:
-        ckpt_path = "data/checkpoints/base_model_12combo.pth"
-        net = load_model(ckpt_path)
-        net.eval()
+        if args.mocap_backend == 'mobileposer':
+            ckpt_path = "data/checkpoints/base_model_12combo.pth"
+            net = load_model(ckpt_path)
+            net.eval()
+        else:
+            net = load_genmo_model(args.genmo_ckpt, args.genmo_exp, device)
+            net.eval()
+        if args.compare_all and args.mocap_backend != 'mobileposer':
+            raise ValueError('--compare-all currently only supports mobileposer backend')
         if args.compare_all:
             raw_net = copy.deepcopy(net).eval()
             ours_net = copy.deepcopy(net).eval()
@@ -172,17 +198,26 @@ if __name__ == '__main__':
             raw_net = None
             ours_net = None
             tic_net = None
-            if args.calibrator_type == 'ours':
-                calibrator = load_combo_calibrator(args.ours_calibrator, device)
-                print(f'Mobileposer model loaded. Ours calibrator: {args.ours_calibrator}')
+            if args.mocap_backend == 'mobileposer':
+                if args.calibrator_type == 'ours':
+                    calibrator = load_combo_calibrator(args.ours_calibrator, device)
+                    print(f'Mobileposer model loaded. Ours calibrator: {args.ours_calibrator}')
+                else:
+                    calibrator = load_tic_calibrator(args.tic_calibrator, device, args.tic_buffer_size, args.tic_trigger_t)
+                    print(f'Mobileposer model loaded. TIC calibrator: {args.tic_calibrator}')
             else:
-                calibrator = load_tic_calibrator(args.tic_calibrator, device, args.tic_buffer_size, args.tic_trigger_t)
-                print(f'Mobileposer model loaded. TIC calibrator: {args.tic_calibrator}')
+                calibrator = GenMoLiveWrapper(net, combo_name='lw_rp_h')
+                print(
+                    f'GENMO model loaded. ckpt: {args.genmo_ckpt}. '
+                    f'exp: {args.genmo_exp}. '
+                    f'history={calibrator.history_frames}, chunk={calibrator.chunk_size}'
+                )
 
     sensor = CalibratedHuaweiSensor(HuaweiDevices.device_ids)
     sensor.calibrate("walking_6dof")
 
     raw_accs, accs, oris, gyros, mags, pressures, ppgs, poses = [], [], [], [], [], [], [], []
+    trans = []
     raw_poses, ours_poses, tic_poses = [], [], []
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     ids = sensor.ids
@@ -237,16 +272,22 @@ if __name__ == '__main__':
                             render=False,
                         )
                     else:
-                        if args.calibrator_type == 'ours':
-                            calibrated_ori = apply_combo_calibrator(calibrator, a, ori)
-                            calibrated_input = make_mocap_input(a, calibrated_ori)
-                            pose = net.forward_frame(calibrated_input)
+                        if args.mocap_backend == 'genmo':
+                            pose, tran = calibrator.forward_frame(a, ori)
                         else:
-                            calibrated_acc, calibrated_ori = apply_tic_calibrator(calibrator, a, ori)
-                            calibrated_input = make_mocap_input(calibrated_acc, calibrated_ori)
-                            pose = net.forward_frame(calibrated_input)
+                            if args.calibrator_type == 'ours':
+                                calibrated_ori = apply_combo_calibrator(calibrator, a, ori)
+                                calibrated_input = make_mocap_input(a, calibrated_ori)
+                                pose = net.forward_frame(calibrated_input)
+                                tran = zero_tran
+                            else:
+                                calibrated_acc, calibrated_ori = apply_tic_calibrator(calibrator, a, ori)
+                                calibrated_input = make_mocap_input(calibrated_acc, calibrated_ori)
+                                pose = net.forward_frame(calibrated_input)
+                                tran = zero_tran
                         poses.append(pose)
-                        viewer.update_all([pose.cpu().numpy()], [zero_tran], render=False)
+                        trans.append(tran)
+                        viewer.update_all([pose.cpu().numpy()], [tran.detach().cpu().numpy()], render=False)
                     viewer.render()
 
                 idx += 1
@@ -266,6 +307,7 @@ if __name__ == '__main__':
     accs = torch.stack(accs)
     oris = torch.stack(oris)
     poses = torch.stack(poses) if poses else torch.empty(0)
+    trans = torch.stack(trans) if trans else torch.empty(0)
     raw_poses = torch.stack(raw_poses) if raw_poses else torch.empty(0)
     ours_poses = torch.stack(ours_poses) if ours_poses else torch.empty(0)
     tic_poses = torch.stack(tic_poses) if tic_poses else torch.empty(0)
@@ -276,7 +318,7 @@ if __name__ == '__main__':
     ppgs = torch.tensor(np.array(ppgs))
     RMI, RSB, acc_bias = sensor.get_cali_matrices()
 
-    print(f"raw_accs: {raw_accs.shape}, accs: {accs.shape}, oris: {oris.shape}, poses: {poses.shape}")
+    print(f"raw_accs: {raw_accs.shape}, accs: {accs.shape}, oris: {oris.shape}, poses: {poses.shape}, trans: {trans.shape}")
     if args.compare_all:
         print(f"raw poses: {raw_poses.shape}, ours poses: {ours_poses.shape}, tic poses: {tic_poses.shape}")
     print(f"gyros: {gyros.shape}, mags: {mags.shape}, pressures: {pressures.shape}, ppgs: {ppgs.shape}")
@@ -297,6 +339,7 @@ if __name__ == '__main__':
         'pressure': pressures,
         'ppg': ppgs,
         'pose': poses,
+        'tran': trans,
         'RMI': RMI,
         'RSB': RSB,
         'acc_bias': acc_bias,

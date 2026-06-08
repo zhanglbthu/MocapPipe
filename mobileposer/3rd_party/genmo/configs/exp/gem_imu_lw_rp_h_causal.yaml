@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - gem_imu_lw_rp_h
+  - _self_
+
+data_name: gem_imu_lw_rp_h_causal
+
+model:
+  model_cfg:
+    streaming:
+      enable: true
+      history_frames: 96
+      future_frames: 24
+      online_chunk_frames: 4
