@@ -8,7 +8,16 @@ from tqdm import tqdm
 from config import amass, datasets, model_config, paths
 from evaluate import PoseEvaluator
 from evaluate_direct import load_direct_model
-from models.imu_calibrator import ComboTemporalIMUCalibrator, TICComboCalibrator, build_imu_input
+from models.imu_calibrator import (
+    BackboneLSTMCalibrator,
+    BackboneMambaCalibrator,
+    ComboTemporalIMUCalibrator,
+    CrossDeviceTransformerCalibrator,
+    CrossDeviceTransformerResidualCalibrator,
+    CrossDeviceMambaCalibrator,
+    TICComboCalibrator,
+    build_imu_input,
+)
 from run_calibrated_directposer import COMBOS
 
 
@@ -16,7 +25,18 @@ def load_combo_calibrator(path: str, device: torch.device):
     checkpoint = torch.load(path, map_location=device)
     args = checkpoint.get("args", {})
     model_type = checkpoint.get("model_type", "combo_temporal_transformer")
-    model_cls = ComboTemporalIMUCalibrator if model_type == "combo_temporal_transformer" else TICComboCalibrator
+    model_cls_map = {
+        "combo_temporal_transformer": ComboTemporalIMUCalibrator,
+        "tic_combo_transformer": TICComboCalibrator,
+        "backbone_mamba_calibrator": BackboneMambaCalibrator,
+        "cross_device_mamba_calibrator": CrossDeviceMambaCalibrator,
+        "backbone_lstm_calibrator": BackboneLSTMCalibrator,
+        "cross_device_transformer_calibrator": CrossDeviceTransformerResidualCalibrator,
+        "cross_device_transformer_abs_calibrator": CrossDeviceTransformerCalibrator,
+    }
+    if model_type not in model_cls_map:
+        raise ValueError(f"Unsupported combo calibrator model_type: {model_type}")
+    model_cls = model_cls_map[model_type]
     model = model_cls(
         combo_size=len(COMBOS[args.get("combo", "lw_rp_h")]),
         predict_acc=args.get("predict_acc", True),
@@ -28,6 +48,7 @@ def load_combo_calibrator(path: str, device: torch.device):
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    model.model_type_name = model_type
     return model
 
 
@@ -43,8 +64,16 @@ def run_combo_calibrator_online(calibrator, acc: torch.Tensor, ori: torch.Tensor
     combo_feat = build_imu_input(acc, ori)[:, combo].to(model_config.device)
     calibrator.reset()
     pred_acc, pred_ori = [], []
+    use_streaming = getattr(calibrator, "model_type_name", "") in {
+        "backbone_mamba_calibrator",
+        "cross_device_mamba_calibrator",
+        "backbone_lstm_calibrator",
+    }
     for frame_idx in range(combo_feat.shape[0]):
-        acc_i, ori_i = calibrator.forward_frame_windowed(combo_feat[frame_idx])
+        if use_streaming:
+            acc_i, ori_i = calibrator.forward_frame(combo_feat[frame_idx])
+        else:
+            acc_i, ori_i = calibrator.forward_frame_windowed(combo_feat[frame_idx])
         if acc_i is not None:
             pred_acc.append(acc_i.cpu())
         pred_ori.append(ori_i.cpu())

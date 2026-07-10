@@ -15,7 +15,13 @@ import keyboard
 from sensor_huawei.sensor import CalibratedHuaweiSensor
 import traceback
 import datetime
-from models.imu_calibrator import ComboTemporalIMUCalibrator, build_imu_input
+from models.imu_calibrator import (
+    BackboneMambaCalibrator,
+    ComboTemporalIMUCalibrator,
+    CrossDeviceMambaCalibrator,
+    TICComboCalibrator,
+    build_imu_input,
+)
 from models.tic_calibrator import TICOnlineCalibrator, TICOperatorConfig, TICTransformerCalibrator
 from models.genmo_live import GenMoLiveWrapper, load_genmo_model
 
@@ -27,7 +33,16 @@ CALIBRATOR_COMBO = [0, 3, 4]
 def load_combo_calibrator(path: str, device: torch.device):
     checkpoint = torch.load(path, map_location=device)
     args = checkpoint.get("args", {})
-    model = ComboTemporalIMUCalibrator(
+    model_type = checkpoint.get("model_type", "combo_temporal_transformer")
+    model_cls_map = {
+        "combo_temporal_transformer": ComboTemporalIMUCalibrator,
+        "tic_combo_transformer": TICComboCalibrator,
+        "backbone_mamba_calibrator": BackboneMambaCalibrator,
+        "cross_device_mamba_calibrator": CrossDeviceMambaCalibrator,
+    }
+    if model_type not in model_cls_map:
+        raise ValueError(f"Unsupported combo calibrator model_type: {model_type}")
+    model = model_cls_map[model_type](
         combo_size=len(CALIBRATOR_COMBO),
         predict_acc=args.get("predict_acc", False),
         hidden_dim=args.get("hidden_dim", 128),

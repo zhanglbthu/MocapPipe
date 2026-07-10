@@ -9,7 +9,16 @@ from torch.utils.tensorboard import SummaryWriter
 
 from config import datasets, model_config, paths
 from evaluate_direct import load_direct_model
-from models.imu_calibrator import ComboTemporalIMUCalibrator, TICComboCalibrator, build_imu_input
+from models.imu_calibrator import (
+    BackboneLSTMCalibrator,
+    BackboneMambaCalibrator,
+    ComboTemporalIMUCalibrator,
+    CrossDeviceTransformerCalibrator,
+    CrossDeviceTransformerResidualCalibrator,
+    CrossDeviceMambaCalibrator,
+    TICComboCalibrator,
+    build_imu_input,
+)
 
 
 COMBO_MAP = {
@@ -185,7 +194,12 @@ def main():
     parser.add_argument("--window-size", type=int, default=125)
     parser.add_argument("--stride", type=int, default=60)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--model-type", type=str, default="combo", choices=["combo", "tic"])
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="combo",
+        choices=["combo", "tic", "mamba_backbone", "xdevice_mamba", "lstm_backbone", "xdevice_transformer", "xdevice_transformer_abs"],
+    )
     parser.add_argument("--imu-loss-weight", type=float, default=1.0)
     parser.add_argument("--pose-loss-weight", type=float, default=0.0)
     parser.add_argument("--jerk-loss-weight", type=float, default=5e-4)
@@ -211,7 +225,25 @@ def main():
 
     device = torch.device(args.device)
     combo = COMBO_MAP[args.combo]
-    model_cls = ComboTemporalIMUCalibrator if args.model_type == "combo" else TICComboCalibrator
+    model_cls_map = {
+        "combo": ComboTemporalIMUCalibrator,
+        "tic": TICComboCalibrator,
+        "mamba_backbone": BackboneMambaCalibrator,
+        "xdevice_mamba": CrossDeviceMambaCalibrator,
+        "lstm_backbone": BackboneLSTMCalibrator,
+        "xdevice_transformer": CrossDeviceTransformerResidualCalibrator,
+        "xdevice_transformer_abs": CrossDeviceTransformerCalibrator,
+    }
+    model_type_name_map = {
+        "combo": "combo_temporal_transformer",
+        "tic": "tic_combo_transformer",
+        "mamba_backbone": "backbone_mamba_calibrator",
+        "xdevice_mamba": "cross_device_mamba_calibrator",
+        "lstm_backbone": "backbone_lstm_calibrator",
+        "xdevice_transformer": "cross_device_transformer_calibrator",
+        "xdevice_transformer_abs": "cross_device_transformer_abs_calibrator",
+    }
+    model_cls = model_cls_map[args.model_type]
     model = model_cls(
         combo_size=len(COMBO_MAP[args.combo]),
         predict_acc=False,
@@ -326,7 +358,7 @@ def main():
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "args": checkpoint_args,
-            "model_type": "combo_temporal_transformer" if args.model_type == "combo" else "tic_combo_transformer",
+            "model_type": model_type_name_map[args.model_type],
             "epoch": epoch,
             "history": history,
         }
@@ -342,3 +374,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    model_type_name_map = {
+        "combo": "combo_temporal_transformer",
+        "tic": "tic_combo_transformer",
+        "mamba_backbone": "backbone_mamba_calibrator",
+        "xdevice_mamba": "cross_device_mamba_calibrator",
+    }
