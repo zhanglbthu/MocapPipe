@@ -23,11 +23,11 @@ from models.imu_calibrator import (
     build_imu_input,
 )
 from models.tic_calibrator import TICOnlineCalibrator, TICOperatorConfig, TICTransformerCalibrator
-from models.genmo_live import GenMoLiveWrapper, load_genmo_model
+from layouts import DEFAULT_LAYOUT, sensor_ids
 
 colors = matplotlib.colormaps['tab10'].colors
 body_model = art.ParametricModel(paths.smpl_file, device='cuda')
-CALIBRATOR_COMBO = [0, 3, 4]
+CALIBRATOR_COMBO = sensor_ids(DEFAULT_LAYOUT)
 
 
 def load_combo_calibrator(path: str, device: torch.device):
@@ -151,13 +151,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--ours-calibrator',
         type=str,
-        default='data/checkpoints/combo_imu_calibrator_lw_rp_h_ori_only_jerk_nopose_fulltrain_tb_noncausal/best.pt',
+        default=str(paths.checkpoint / 'combo_imu_calibrator_lw_rp_h_ori_only_jerk_nopose_fulltrain_tb_noncausal/best.pt'),
         help='ours combo calibrator checkpoint for lw_rp_h (windowed non-causal version)',
     )
     parser.add_argument(
         '--tic-calibrator',
         type=str,
-        default='data/checkpoints/tic_calibrator_amass_full/best.pt',
+        default=str(paths.checkpoint / 'tic_calibrator_amass_full/best.pt'),
         help='TIC calibrator checkpoint',
     )
     parser.add_argument(
@@ -191,10 +191,12 @@ if __name__ == '__main__':
 
     if args.mocap:
         if args.mocap_backend == 'mobileposer':
-            ckpt_path = "data/checkpoints/base_model_12combo.pth"
+            ckpt_path = paths.checkpoint / "base_model_12combo.pth"
             net = load_model(ckpt_path)
             net.eval()
         else:
+            from models.genmo_live import GenMoLiveWrapper, load_genmo_model
+
             net = load_genmo_model(args.genmo_ckpt, args.genmo_exp, device)
             net.eval()
         if args.compare_all and args.mocap_backend != 'mobileposer':

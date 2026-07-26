@@ -7,8 +7,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
-from config import datasets, model_config, paths
+from config import amass, datasets, model_config, paths
 from evaluate_direct import load_direct_model
+from layouts import SENSOR_LAYOUTS
 from models.imu_calibrator import (
     BackboneLSTMCalibrator,
     BackboneMambaCalibrator,
@@ -21,9 +22,7 @@ from models.imu_calibrator import (
 )
 
 
-COMBO_MAP = {
-    "lw_rp_h": [0, 3, 4],
-}
+COMBO_MAP = SENSOR_LAYOUTS
 
 
 class ComboCalibratorWindowDataset(Dataset):
@@ -155,10 +154,18 @@ def evaluate(model, loader, mocap_model, combo, device, imu_loss_weight, pose_lo
             seq_mask = batch["seq_mask"].to(device)
             valid_mask = batch["valid_mask"].to(device) & seq_mask.unsqueeze(-1)
 
-            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, causal=False, return_ori6d=True)
+            _, pred_ori, pred_ori6d = model(
+                inputs,
+                seq_mask=seq_mask,
+                causal=model.training_causal,
+                return_ori6d=True,
+            )
             ori_loss = masked_mse(pred_ori, target_ori, valid_mask)
             jerk_loss = compute_jerk_loss(pred_ori6d, seq_mask)
             pose_loss = pred_ori6d.new_tensor(0.0)
+            if pose_loss_weight > 0:
+                imu_inputs = build_combo_imu(inputs[..., :3] / amass.acc_scale, pred_ori, combo)
+                pose_loss = compute_pose_loss(mocap_model, imu_inputs, seq_mask, target_pose)
 
             batch_size = inputs.shape[0]
             total_ori += ori_loss.item() * batch_size
@@ -180,10 +187,10 @@ def evaluate(model, loader, mocap_model, combo, device, imu_loss_weight, pose_lo
 def main():
     parser = ArgumentParser()
     parser.add_argument("--train-data", type=str, default=str(paths.eval_dir / datasets.huawei_new_calibrator_train))
-    parser.add_argument("--val-data", type=str, default=str(paths.eval_dir / datasets.huawei_new_calibrator_test))
+    parser.add_argument("--val-data", type=str, default=str(paths.eval_dir / datasets.huawei_new_calibrator_val))
     parser.add_argument("--combo", type=str, default="lw_rp_h", choices=sorted(COMBO_MAP))
     parser.add_argument("--mocap-model", type=str, required=True)
-    parser.add_argument("--save-dir", type=str, default="data/checkpoints/combo_imu_calibrator")
+    parser.add_argument("--save-dir", type=str, default=str(paths.checkpoint / "combo_imu_calibrator"))
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -203,6 +210,11 @@ def main():
     parser.add_argument("--imu-loss-weight", type=float, default=1.0)
     parser.add_argument("--pose-loss-weight", type=float, default=0.0)
     parser.add_argument("--jerk-loss-weight", type=float, default=5e-4)
+    parser.add_argument(
+        "--causal",
+        action="store_true",
+        help="train a strictly causal model; default is the non-causal accuracy upper bound",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -253,6 +265,7 @@ def main():
         nhead=args.nhead,
         max_seq_len=args.window_size,
     ).to(device)
+    model.training_causal = args.causal
     mocap_model = load_direct_model(
         args.mocap_model,
         backbone="transformer",
@@ -291,10 +304,18 @@ def main():
             seq_mask = batch["seq_mask"].to(device)
             valid_mask = batch["valid_mask"].to(device) & seq_mask.unsqueeze(-1)
 
-            _, pred_ori, pred_ori6d = model(inputs, seq_mask=seq_mask, causal=False, return_ori6d=True)
+            _, pred_ori, pred_ori6d = model(
+                inputs,
+                seq_mask=seq_mask,
+                causal=args.causal,
+                return_ori6d=True,
+            )
             ori_loss = masked_mse(pred_ori, target_ori, valid_mask)
             jerk_loss = compute_jerk_loss(pred_ori6d, seq_mask)
             pose_loss = pred_ori6d.new_tensor(0.0)
+            if args.pose_loss_weight > 0:
+                imu_inputs = build_combo_imu(inputs[..., :3] / amass.acc_scale, pred_ori, combo)
+                pose_loss = compute_pose_loss(mocap_model, imu_inputs, seq_mask, target_pose)
             loss = (
                 args.imu_loss_weight * ori_loss
                 + args.pose_loss_weight * pose_loss
@@ -374,9 +395,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    model_type_name_map = {
-        "combo": "combo_temporal_transformer",
-        "tic": "tic_combo_transformer",
-        "mamba_backbone": "backbone_mamba_calibrator",
-        "xdevice_mamba": "cross_device_mamba_calibrator",
-    }

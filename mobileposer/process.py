@@ -415,6 +415,21 @@ def _split_items(items, train_ratio: float = 0.8, seed: int = 1234):
     return {"train": shuffled[:train_count], "test": shuffled[train_count:]}
 
 
+def _split_items_by_subject(items, train_ratio: float = 0.8, seed: int = 1234):
+    """Split complete recording subjects, never windows or sequences."""
+    subjects = sorted({item["source_subject"] for item in items})
+    if len(subjects) < 2:
+        raise ValueError("At least two Huawei subjects are required for train/validation splitting.")
+    subject_split = _split_items(subjects, train_ratio=train_ratio, seed=seed)
+    train_subjects = set(subject_split["train"])
+    return {
+        "train": [item for item in items if item["source_subject"] in train_subjects],
+        "val": [item for item in items if item["source_subject"] not in train_subjects],
+        "train_subjects": sorted(train_subjects),
+        "val_subjects": sorted(set(subjects) - train_subjects),
+    }
+
+
 def _pad_devices(tensor: torch.Tensor, target_devices: int, trailing_shape):
     if tensor.shape[1] == target_devices:
         return tensor
@@ -532,24 +547,43 @@ def _collect_imuposer_calibrator_items(split: str = "train"):
 def process_huawei_new_calibrator(split: str = "train", train_ratio: float = 0.8, seed: int = 1234):
     """Prepare paired real-to-synthetic IMU calibration data.
 
-    Train split: all Huawei_new + all IMUPoser train.
-    Test split: all IMUPoser test.
+    Huawei subjects are split between train and validation.  IMUPoser train is
+    used only for training; IMUPoser test remains untouched until final test.
     """
+    huawei_split = _split_items_by_subject(
+        _collect_huawei_new_calibrator_items(),
+        train_ratio=train_ratio,
+        seed=seed,
+    )
     if split == "train":
-        selected_items = _collect_huawei_new_calibrator_items() + _collect_imuposer_calibrator_items(split="train")
+        selected_items = huawei_split["train"] + _collect_imuposer_calibrator_items(split="train")
         split_meta = {
             "train_sources": ["huawei_new", "imuposer_train"],
+            "validation_sources": ["huawei_new"],
             "test_sources": ["imuposer_test"],
-            "seed": None,
-            "train_ratio": None,
+            "subjects": huawei_split["train_subjects"],
+            "seed": seed,
+            "train_ratio": train_ratio,
+        }
+    elif split == "val":
+        selected_items = huawei_split["val"]
+        split_meta = {
+            "train_sources": ["huawei_new", "imuposer_train"],
+            "validation_sources": ["huawei_new"],
+            "test_sources": ["imuposer_test"],
+            "subjects": huawei_split["val_subjects"],
+            "seed": seed,
+            "train_ratio": train_ratio,
         }
     elif split == "test":
         selected_items = _collect_imuposer_calibrator_items(split="test")
         split_meta = {
             "train_sources": ["huawei_new", "imuposer_train"],
+            "validation_sources": ["huawei_new"],
             "test_sources": ["imuposer_test"],
-            "seed": None,
-            "train_ratio": None,
+            "subjects": ["imuposer_test"],
+            "seed": seed,
+            "train_ratio": train_ratio,
         }
     else:
         raise ValueError(f"Unsupported split: {split}")
@@ -627,6 +661,7 @@ if __name__ == "__main__":
         process_huawei(split="test")
     elif args.dataset == "huawei_new_calibrator":
         process_huawei_new_calibrator(split="train", train_ratio=args.train_ratio, seed=args.split_seed)
+        process_huawei_new_calibrator(split="val", train_ratio=args.train_ratio, seed=args.split_seed)
         process_huawei_new_calibrator(split="test", train_ratio=args.train_ratio, seed=args.split_seed)
     else:
         raise ValueError(f"Dataset {args.dataset} not supported.")

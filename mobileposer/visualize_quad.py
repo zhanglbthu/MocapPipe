@@ -9,7 +9,7 @@ import articulate as art
 from aitviewer.headless import HeadlessRenderer
 from aitviewer.renderables.meshes import Meshes
 from config import datasets, paths
-from visualize import maybe_zero_translation, pose_to_vertices
+from utils.rendering import maybe_zero_translation, pose_to_vertices
 
 
 def prepare_vertices_quad(gt_vertices, ours_vertices, tic_vertices, base_vertices, subject_spacing):

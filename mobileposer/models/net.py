@@ -11,7 +11,6 @@ import time
 
 from config import *
 from utils.model_utils import reduced_pose_to_full
-from helpers import *
 import articulate as art
 from models.poser import Poser
 from models.joints import Joints
@@ -149,7 +148,7 @@ class MobilePoserNet(L.LightningModule):
         tran = torch.stack([velocity[:i+1].sum(dim=0) for i in range(velocity.shape[0])]) # velocity to root position
 
         # Use a Physics Optimizer
-        if getenv("PHYSICS"):
+        if os.getenv("PHYSICS"):
             pose = pose.view(-1, 24, 3, 3)
             acc = torch.zeros((pose.shape[0], 5, 3))
 
@@ -203,7 +202,7 @@ class MobilePoserNet(L.LightningModule):
         self.last_root_pos += velocity
 
         # physics module
-        if getenv("PHYSICS"):
+        if os.getenv("PHYSICS"):
             joint_velocity = vel.view(-1, 24, 3) 
 
             # optimize pose

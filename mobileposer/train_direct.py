@@ -12,7 +12,7 @@ from models.directposer import DirectPoserNet
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--save-dir", type=str, default="data/checkpoints/directposer_amass")
+    parser.add_argument("--save-dir", type=str, default=str(paths.checkpoint / "directposer_amass"))
     parser.add_argument("--finetune-dataset", type=str, default=None)
     parser.add_argument("--backbone", type=str, default="lstm", choices=["lstm", "transformer"])
     parser.add_argument("--transformer-d-model", type=int, default=192)

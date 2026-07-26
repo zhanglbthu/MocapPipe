@@ -1,4 +1,3 @@
-import json
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -6,8 +5,8 @@ import torch
 from tqdm import tqdm
 
 from config import amass, datasets, model_config, paths
-from evaluate import PoseEvaluator
 from evaluate_direct import load_direct_model
+from layouts import SENSOR_LAYOUTS
 from models.imu_calibrator import (
     BackboneLSTMCalibrator,
     BackboneMambaCalibrator,
@@ -18,7 +17,10 @@ from models.imu_calibrator import (
     TICComboCalibrator,
     build_imu_input,
 )
-from run_calibrated_directposer import COMBOS
+from utils.evaluation import PoseEvaluator, aggregate_sequence_metrics, write_evaluation_report
+
+
+COMBOS = SENSOR_LAYOUTS
 
 
 def load_combo_calibrator(path: str, device: torch.device):
@@ -49,6 +51,7 @@ def load_combo_calibrator(path: str, device: torch.device):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     model.model_type_name = model_type
+    model.training_causal = bool(args.get("causal", False))
     return model
 
 
@@ -64,11 +67,7 @@ def run_combo_calibrator_online(calibrator, acc: torch.Tensor, ori: torch.Tensor
     combo_feat = build_imu_input(acc, ori)[:, combo].to(model_config.device)
     calibrator.reset()
     pred_acc, pred_ori = [], []
-    use_streaming = getattr(calibrator, "model_type_name", "") in {
-        "backbone_mamba_calibrator",
-        "cross_device_mamba_calibrator",
-        "backbone_lstm_calibrator",
-    }
+    use_streaming = getattr(calibrator, "training_causal", False)
     for frame_idx in range(combo_feat.shape[0]):
         if use_streaming:
             acc_i, ori_i = calibrator.forward_frame(combo_feat[frame_idx])
@@ -88,7 +87,11 @@ def main():
     parser.add_argument("--mocap-model", type=str, required=True)
     parser.add_argument("--dataset", type=str, default="imuposer")
     parser.add_argument("--combo", type=str, default="lw_rp_h", choices=sorted(COMBOS))
-    parser.add_argument("--output-dir", type=str, default="data/eval/imuposer/lw_rp_h/combo_calibrated_directposer_online")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(paths.eval_output_dir / "imuposer/lw_rp_h/combo_calibrated_directposer_online"),
+    )
     args = parser.parse_args()
 
     if args.dataset != "imuposer":
@@ -142,7 +145,7 @@ def main():
             pose_p.append(mocap_model.forward_frame(imu[frame_idx].to(device)).cpu())
         pose_p = torch.stack(pose_p)
 
-        err = evaluator.eval(pose_p, pose_t)
+        err = evaluator.evaluate(pose_p, pose_t)
         seq_errs.append(err)
         torch.save(
             {
@@ -154,23 +157,22 @@ def main():
             out_dir / f"{seq_idx}.pt",
         )
 
-    summary = torch.stack(seq_errs).mean(dim=0)
+    summary = aggregate_sequence_metrics(seq_errs)
     PoseEvaluator.print(summary)
-    names = [
-        "SIP Error (deg)",
-        "Angular Error (deg)",
-        "Masked Angular Error (deg)",
-        "Positional Error (cm)",
-        "Masked Positional Error (cm)",
-        "Mesh Error (cm)",
-        "Jitter Error (100m/s^3)",
-        "Distance Error (cm)",
-    ]
-    report = {name: {"mean": float(summary[i, 0]), "std": float(summary[i, 1])} for i, name in enumerate(names)}
-    (out_dir / "report.json").write_text(json.dumps(report, indent=2))
-    with open(out_dir / "report.txt", "w") as f:
-        for name in names:
-            f.write(f"{name}: {report[name]['mean']:.2f} (+/- {report[name]['std']:.2f})\n")
+    write_evaluation_report(
+        out_dir,
+        summary,
+        metadata={
+            "method": "ours",
+            "dataset": args.dataset,
+            "combo": args.combo,
+            "calibrator": str(Path(args.calibrator).resolve()),
+            "mocap_model": str(Path(args.mocap_model).resolve()),
+            "model_type": calibrator.model_type_name,
+            "causal": calibrator.training_causal,
+            "lookahead_frames": 0 if calibrator.training_causal else getattr(calibrator, "online_future_frames", None),
+        },
+    )
 
 
 if __name__ == "__main__":

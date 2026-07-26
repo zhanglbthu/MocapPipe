@@ -1,3 +1,5 @@
+import os
+
 import torch
 from pathlib import Path
 from enum import Enum, auto
@@ -24,26 +26,41 @@ class finetune_hypers:
 
 
 class paths:
-    """Relevant paths for MobilePoser. Change as necessary."""
-    root_dir = Path().absolute()
-    data_dir = root_dir / "data"
+    """Project paths.
+
+    Paths are resolved from this file instead of the current working
+    directory.  Dataset locations can be overridden without editing source
+    code; see ``configs/paths.env.example``.
+    """
+
+    package_dir = Path(__file__).resolve().parent
+    root_dir = package_dir.parent
+    data_dir = Path(os.getenv("MOBILEPOSER_DATA_DIR", package_dir / "data")).expanduser().resolve()
+
+    _legacy_dataset_root = Path("/root/autodl-tmp/dataset")
+    _default_dataset_root = _legacy_dataset_root if _legacy_dataset_root.exists() else data_dir / "datasets"
+    dataset_root = Path(os.getenv("MOBILEPOSER_DATASET_ROOT", _default_dataset_root)).expanduser().resolve()
+
     checkpoint = data_dir / "checkpoints"
     experiments_dir = data_dir / "experiments"
     paper_dir = data_dir / "paper"
     eval_output_dir = data_dir / "eval"
     video_output_dir = data_dir / "video"
-    smpl_file = root_dir / "smpl/basicmodel_m.pkl"
+    record_dir = data_dir / "records"
+    dev_data = data_dir / "device_data"
+    smpl_file = Path(os.getenv("MOBILEPOSER_SMPL_FILE", package_dir / "smpl/basicmodel_m.pkl")).expanduser().resolve()
     weights_file = checkpoint / "weights.pth"
-    raw_amass = Path("/root/autodl-tmp/dataset/raw/AMASS")           # TODO: replace with your path
-    # raw_dip = Path("/data/projects/Pose/raw/DIP_IMU")           # TODO: replace with your path
-    raw_imuposer = Path("/root/autodl-tmp/dataset/raw/IMUPoser")     # TODO: replace with your path\
-    raw_huawei = Path("/root/autodl-tmp/dataset/raw/Huawei")     
-    raw_huawei_new = Path("/root/autodl-tmp/dataset/raw/Huawei_new")
-    eval_dir = Path("/root/autodl-tmp/dataset/processed/eval")
-    # processed_datasets = root_dir / "data/processed_datasets"
-    processed_datasets = Path("/root/autodl-tmp/dataset/processed")  
-    # raw_totalcapture_official = root_dir / "data/raw/TotalCapture/raw"  # TODO: replace with your path
-    # calibrated_totalcapture = root_dir / "data/raw/TotalCapture/IMU"  # TODO: replace with your path
+    raw_dir = dataset_root / "raw"
+    raw_amass = raw_dir / "AMASS"
+    raw_dip = raw_dir / "DIP_IMU"
+    raw_imuposer = raw_dir / "IMUPoser"
+    raw_huawei = raw_dir / "Huawei"
+    raw_huawei_new = raw_dir / "Huawei_new"
+    raw_totalcapture_official = raw_dir / "TotalCapture" / "raw"
+    calibrated_totalcapture = raw_dir / "TotalCapture" / "IMU"
+    processed_datasets = dataset_root / "processed"
+    eval_dir = processed_datasets / "eval"
+    processed_totalcapture = eval_dir / "totalcapture.pt"
 
 class model_config:
     """MobilePoser Model configurations."""
@@ -120,13 +137,12 @@ class datasets:
     imuposer = "imuposer.pt"
     imuposer_train = "imuposer_train.pt"
     imuposer_test = "imuposer_test.pt"
-    imuposer_toy_multimodal_train = "imuposer_toy_multimodal_train.pt"
-    imuposer_toy_multimodal_test = "imuposer_toy_multimodal_test.pt"
     
     # Huawei dataset
     huawei_train = "huawei_train.pt"
     huawei_test = "huawei_test.pt"
     huawei_new_calibrator_train = "huawei_new_calibrator_train.pt"
+    huawei_new_calibrator_val = "huawei_new_calibrator_val.pt"
     huawei_new_calibrator_test = "huawei_new_calibrator_test.pt"
 
     # Test datasets
@@ -135,7 +151,6 @@ class datasets:
         'totalcapture': totalcapture,
         'imuposer': imuposer_test,
         'huawei': huawei_test,
-        'imuposer_toy_multimodal': imuposer_toy_multimodal_test,
     }
 
     # Finetune datasets
@@ -143,7 +158,6 @@ class datasets:
         'dip': dip_train,
         'imuposer': imuposer_train,
         'huawei': huawei_train,
-        'imuposer_toy_multimodal': imuposer_toy_multimodal_train,
     }
 
     # AMASS datasets (add more as they become available in AMASS!)

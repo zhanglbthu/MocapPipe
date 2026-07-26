@@ -7,8 +7,8 @@ from tqdm import tqdm
 import articulate as art
 from config import datasets, joint_set, model_config, paths
 from data import PoseDataset
-from evaluate import PoseEvaluator
 from models.directposer import DirectPoserNet
+from utils.evaluation import PoseEvaluator, aggregate_sequence_metrics, write_evaluation_report
 
 
 def load_direct_model(model_path: str, backbone: str, transformer_kwargs: dict):
@@ -39,16 +39,14 @@ def evaluate_pose(model, dataset, save_dir=None):
             pose_p.append(model.forward_frame(x[i]))
         pose_p = torch.stack(pose_p)
 
-        pose_errs.append(evaluator.eval(pose_p, pose_t))
+        pose_errs.append(evaluator.evaluate(pose_p, pose_t))
 
         if save_dir is not None:
             out_path = save_dir / f"{idx + 1}.pt"
             torch.save({"pose_p": pose_p.cpu(), "pose_t": pose_t.cpu()}, out_path)
 
-    errors = torch.stack(pose_errs)
-    mean = errors.mean(dim=0)
-    std = errors.std(dim=0)
-    stats = torch.stack([mean, std], dim=1)
+    # Each evaluator result already stores [mean, std] for every metric.
+    stats = aggregate_sequence_metrics(pose_errs)
     PoseEvaluator.print(stats)
     return stats
 
@@ -79,9 +77,22 @@ def main():
     model = load_direct_model(args.model, args.backbone, transformer_kwargs)
     dataset = PoseDataset(fold="test", evaluate=args.dataset)
 
-    save_dir = Path("data") / "eval" / args.dataset / args.combo / "directposer"
+    save_dir = paths.eval_output_dir / args.dataset / args.combo / "directposer"
     save_dir.mkdir(parents=True, exist_ok=True)
-    evaluate_pose(model, dataset, save_dir=save_dir)
+    stats = evaluate_pose(model, dataset, save_dir=save_dir)
+    write_evaluation_report(
+        save_dir,
+        stats,
+        metadata={
+            "method": "raw",
+            "dataset": args.dataset,
+            "combo": args.combo,
+            "mocap_model": str(Path(args.model).resolve()),
+            "backbone": args.backbone,
+            "causal_input": True,
+            "lookahead_frames": 0,
+        },
+    )
 
 
 if __name__ == "__main__":

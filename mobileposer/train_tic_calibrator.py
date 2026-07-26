@@ -10,11 +10,10 @@ from torch.utils.tensorboard import SummaryWriter
 import articulate as art
 from config import amass, datasets, model_config, paths
 from models.tic_calibrator import TICTransformerCalibrator, simulate_imu_drift_offset
+from layouts import SENSOR_LAYOUTS
 
 
-COMBO_MAP = {
-    "lw_rp_h": [0, 3, 4],
-}
+COMBO_MAP = SENSOR_LAYOUTS
 
 
 class AMASSTICWindowDataset(Dataset):
@@ -141,7 +140,7 @@ def main():
     parser.add_argument("--d-ff", type=int, default=512)
     parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--save-dir", type=str, default="data/checkpoints/tic_calibrator_amass")
+    parser.add_argument("--save-dir", type=str, default=str(paths.checkpoint / "tic_calibrator_amass"))
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 

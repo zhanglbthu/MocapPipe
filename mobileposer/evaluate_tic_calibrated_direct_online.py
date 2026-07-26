@@ -1,4 +1,3 @@
-import json
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -6,10 +5,13 @@ import torch
 from tqdm import tqdm
 
 from config import amass, datasets, model_config, paths
-from evaluate import PoseEvaluator
 from evaluate_direct import load_direct_model
+from layouts import SENSOR_LAYOUTS
 from models.tic_calibrator import TICOnlineCalibrator, TICOperatorConfig, TICTransformerCalibrator
-from run_calibrated_directposer import COMBOS
+from utils.evaluation import PoseEvaluator, aggregate_sequence_metrics, write_evaluation_report
+
+
+COMBOS = SENSOR_LAYOUTS
 
 
 def load_tic_calibrator(path: str, device: torch.device, buffer_size: int, trigger_t: float):
@@ -64,7 +66,11 @@ def main():
     parser.add_argument("--combo", type=str, default="lw_rp_h", choices=sorted(COMBOS))
     parser.add_argument("--buffer-size", type=int, default=512)
     parser.add_argument("--trigger-t", type=float, default=1.0)
-    parser.add_argument("--output-dir", type=str, default="data/eval/imuposer/lw_rp_h/tic_calibrated_directposer_online")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(paths.eval_output_dir / "imuposer/lw_rp_h/tic_calibrated_directposer_online"),
+    )
     args = parser.parse_args()
 
     if args.dataset != "imuposer":
@@ -117,7 +123,7 @@ def main():
             pose_p.append(mocap_model.forward_frame(imu[frame_idx].to(device)).cpu())
         pose_p = torch.stack(pose_p)
 
-        err = evaluator.eval(pose_p, pose_t)
+        err = evaluator.evaluate(pose_p, pose_t)
         seq_errs.append(err)
         torch.save(
             {
@@ -129,26 +135,23 @@ def main():
             out_dir / f"{seq_idx}.pt",
         )
 
-    errors = torch.stack(seq_errs)
-    mean = errors.mean(dim=0)
-    std = errors.std(dim=0)
-    stats = torch.stack([mean, std], dim=1)
+    # PoseEvaluator already returns [mean, std] for each sequence and metric.
+    stats = aggregate_sequence_metrics(seq_errs)
     PoseEvaluator.print(stats)
-    names = [
-        "SIP Error (deg)",
-        "Angular Error (deg)",
-        "Masked Angular Error (deg)",
-        "Positional Error (cm)",
-        "Masked Positional Error (cm)",
-        "Mesh Error (cm)",
-        "Jitter Error (100m/s^3)",
-        "Distance Error (cm)",
-    ]
-    report = {name: {"mean": float(stats[i, 0]), "std": float(stats[i, 1])} for i, name in enumerate(names)}
-    (out_dir / "report.json").write_text(json.dumps(report, indent=2))
-    with open(out_dir / "report.txt", "w") as f:
-        for name in names:
-            f.write(f"{name}: {report[name]['mean']:.2f} (+/- {report[name]['std']:.2f})\n")
+    write_evaluation_report(
+        out_dir,
+        stats,
+        metadata={
+            "method": "tic",
+            "dataset": args.dataset,
+            "combo": args.combo,
+            "calibrator": str(Path(args.calibrator).resolve()),
+            "mocap_model": str(Path(args.mocap_model).resolve()),
+            "causal": True,
+            "buffer_size": args.buffer_size,
+            "trigger_seconds": args.trigger_t,
+        },
+    )
 
 
 if __name__ == "__main__":

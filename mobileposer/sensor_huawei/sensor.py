@@ -6,9 +6,22 @@ import threading
 import articulate as art
 import os
 import cv2
-import winsound
+try:
+    import winsound
+except ImportError:  # Windows-only; live sensing also runs on Linux.
+    winsound = None
 np.set_printoptions(precision=10, suppress=True)
 torch.set_printoptions(sci_mode=False)
+
+
+def _beep(frequency=440, duration_ms=600):
+    """Best-effort calibration cue on Windows and headless Linux hosts."""
+    if winsound is not None:
+        winsound.Beep(frequency, duration_ms)
+    else:
+        print("\a", end="", flush=True)
+
+
 class DataReceiver(threading.Thread):
     def __init__(self, sock, huawei_sensor, buffer_size=1024):
         super().__init__()
@@ -230,7 +243,7 @@ class CalibratedHuaweiSensor(HuaweiSensor):
         self.cal_acc_bias()
         RIS_N0 = self.get()[4]
 
-        winsound.Beep(440, 600)
+        _beep()
         print('Step forward now.')
         begin_t = last_t = self.get()[0][0]
         p, v = torch.zeros(self.N, 3), torch.zeros(self.N, 3)

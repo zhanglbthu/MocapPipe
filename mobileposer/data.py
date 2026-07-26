@@ -11,8 +11,6 @@ from tqdm import tqdm
 
 import articulate as art
 from config import *
-from utils import *
-from helpers import *
 
 
 class PoseDataset(Dataset):
@@ -211,4 +209,3 @@ class PoseDataModule(L.LightningDataModule):
 
     def test_dataloader(self):
         return self._dataloader(self.test_dataset)
-
